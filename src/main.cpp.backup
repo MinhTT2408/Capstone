@@ -1,0 +1,469 @@
+// ESP32 + 3x BTS7960: sequential sine-wave speed profiles
+// Each motor runs a full sine cycle; next motor starts after the previous finishes.
+// Tested with ESP32 Arduino core. Uses LEDC (hardware PWM).
+
+#include <Arduino.h>
+#include <math.h>
+#include <esp32-hal-ledc.h>
+// ===================== USER TUNABLE PARAMETERS =====================
+
+// Sine profile timing
+static const uint32_t SINE_DURATION_MS = 5000;   // total time per motor for one sine cycle
+static const uint16_t SINE_STEPS       = 300;    // number of samples across the cycle (smoothness)
+static const uint32_t PAUSE_BETWEEN_MS = 400;    // small pause after each motor finishes
+
+// PWM setup
+static const uint32_t PWM_FREQ   = 20000;        // 20 kHz -> silent for most motors
+static const uint8_t  PWM_RESBIT = 10;           // 10-bit resolution (0..1023)
+static const int      PWM_MAX    = (1 << PWM_RESBIT) - 1;
+
+// If you want forward-only (no reversing), set to true.
+// Then speed = sin^2 half-wave (0..π) mirrored over time; direction always forward.
+static const bool FORWARD_ONLY = false;
+
+// ===================== PIN MAP =====================
+// Motor 1
+static const int M1_RPWM = 25;
+static const int M1_LPWM = 26;
+static const int M1_REN  = -1;    // set to -1 if hard-wired HIGH
+static const int M1_LEN  = -1;    // set to -1 if hard-wired HIGH
+
+// Motor 2
+static const int M2_RPWM = 32;
+static const int M2_LPWM = 33;
+static const int M2_REN  = -1;
+static const int M2_LEN  = -1;
+
+// Motor 3
+static const int M3_RPWM = 34;
+static const int M3_LPWM = 35;
+static const int M3_REN  = -1;
+static const int M3_LEN  = -1;
+
+static const int S_M1_F = 45; // Motor1 forward sensor
+static const int S_M1_R = 46; // Motor1 reverse sensor
+static const int S_M2_F = 18; // Motor2 forward sensor
+static const int S_M2_R = 27; // Motor2 reverse sensor
+static const int S_M3_F = 22; // Motor3 forward sensor
+static const int S_M3_R = 21; // Motor3 reverse sensor
+
+// Encoder pins (quadrature encoders: A and B channels)
+static const int ENC_M1_A = 54; // Motor1 encoder channel A
+static const int ENC_M1_B = 55; // Motor1 encoder channel B
+static const int ENC_M2_A = 12; // Motor2 encoder channel A
+static const int ENC_M2_B = 13; // Motor2 encoder channel B
+static const int ENC_M3_A = 50; // Motor3 encoder channel A
+static const int ENC_M3_B = 51; // Motor3 encoder channel B
+
+// ===================== ENCODER CONFIGURATION =====================
+static const int ENCODER_PPR = 600;        // Pulses Per Revolution (adjust to your encoder)
+static const float COUNTS_PER_REV = ENCODER_PPR * 4.0f; // x4 quadrature decoding
+
+// ===================== PID CONFIGURATION =====================
+static const float PID_KP = 2.5f;          // Proportional gain
+static const float PID_KI = 0.8f;          // Integral gain
+static const float PID_KD = 0.1f;          // Derivative gain
+static const float PID_SAMPLE_TIME_MS = 10.0f;  // PID update rate (10ms = 100Hz)
+static const float PID_OUTPUT_LIMIT = PWM_MAX;  // Max PID output = max PWM
+static const float PID_INTEGRAL_LIMIT = 500.0f; // Anti-windup limit
+// ===================== INTERNAL TYPES =====================
+enum Dir { FORWARD = 0, REVERSE = 1 };
+
+// Represents one BTS7960 (two PWM pins + optional enable pins)
+struct BTS7960 {
+  int rpwmPin;
+  int lpwmPin;
+  int renPin;
+  int lenPin;
+  int rpwmCh;  // LEDC channel indices
+  int lpwmCh;
+
+  void begin(int rpwmChannel, int lpwmChannel) {
+    rpwmCh = rpwmChannel;
+    lpwmCh = lpwmChannel;
+
+    // Configure LEDC channels (hardware PWM)
+    ledcSetup(rpwmCh, PWM_FREQ, PWM_RESBIT);
+    ledcSetup(lpwmCh, PWM_FREQ, PWM_RESBIT);
+
+    // Attach channels to pins
+    ledcAttachPin(rpwmPin, rpwmCh);
+    ledcAttachPin(lpwmPin, lpwmCh);
+
+    // Optional EN pins
+    if (renPin >= 0) {
+      pinMode(renPin, OUTPUT);
+      digitalWrite(renPin, HIGH);  // enable
+    }
+    if (lenPin >= 0) {
+      pinMode(lenPin, OUTPUT);
+      digitalWrite(lenPin, HIGH);  // enable
+    }
+
+    // Ensure stopped
+    brake();
+  }
+
+  // Set speed and direction. duty in [0..PWM_MAX].
+  void set(int duty, Dir dir) {
+    duty = constrain(duty, 0, PWM_MAX);
+    if (dir == FORWARD) {
+      ledcWrite(rpwmCh, duty);
+      ledcWrite(lpwmCh, 0);
+    } else {
+      ledcWrite(rpwmCh, 0);
+      ledcWrite(lpwmCh, duty);
+    }
+  }
+
+  // Coast = both PWMs 0 (no drive)
+  void coast() {
+    ledcWrite(rpwmCh, 0);
+    ledcWrite(lpwmCh, 0);
+  }
+
+  // Brake = both PWMs high duty (active short through H-bridge low-side/high-side per board)
+  // For BTS7960 boards, "brake" is approximated by driving both sides; we’ll coast instead to be safe.
+  void brake() {
+    coast(); // safest default for these modules
+  }
+};
+
+// ===================== GLOBALS =====================
+// bit flags set from ISR: bit 0..5 for sensors S_M1_F..S_M3_R
+volatile uint8_t sensorFlags = 0;
+
+// Minimal ISRs: mark the corresponding bit when a change occurs
+void IRAM_ATTR sensorISR0() { sensorFlags |= (1 << 0); } // S_M1_F
+void IRAM_ATTR sensorISR1() { sensorFlags |= (1 << 1); } // S_M1_R
+void IRAM_ATTR sensorISR2() { sensorFlags |= (1 << 2); } // S_M2_F
+void IRAM_ATTR sensorISR3() { sensorFlags |= (1 << 3); } // S_M2_R
+void IRAM_ATTR sensorISR4() { sensorFlags |= (1 << 4); } // S_M3_F
+void IRAM_ATTR sensorISR5() { sensorFlags |= (1 << 5); } // S_M3_R
+
+// ===================== ENCODER POSITION TRACKING =====================
+// Encoder positions (counts) - updated by ISRs
+volatile long encoderPos[3] = {0, 0, 0};
+
+// Last state of encoder B pins (for direction detection)
+volatile uint8_t lastEncB[3] = {0, 0, 0};
+
+// Encoder ISRs: quadrature decoding (x4 counting)
+// Triggered on CHANGE of channel A; read channel B to determine direction
+void IRAM_ATTR encoderISR_M1() {
+  int a = digitalRead(ENC_M1_A);
+  int b = digitalRead(ENC_M1_B);
+  if (a == b) {
+    encoderPos[0]++; // Forward
+  } else {
+    encoderPos[0]--; // Reverse
+  }
+}
+
+void IRAM_ATTR encoderISR_M2() {
+  int a = digitalRead(ENC_M2_A);
+  int b = digitalRead(ENC_M2_B);
+  if (a == b) {
+    encoderPos[1]++;
+  } else {
+    encoderPos[1]--;
+  }
+}
+
+void IRAM_ATTR encoderISR_M3() {
+  int a = digitalRead(ENC_M3_A);
+  int b = digitalRead(ENC_M3_B);
+  if (a == b) {
+    encoderPos[2]++;
+  } else {
+    encoderPos[2]--;
+  }
+}
+
+// ===================== PID CONTROLLER =====================
+struct PIDController {
+  float kp, ki, kd;
+  float setpoint;
+  float integral;
+  float lastError;
+  float outputMin, outputMax;
+  float integralMin, integralMax;
+  unsigned long lastTime;
+
+  void init(float p, float i, float d, float outMin, float outMax, float intMin, float intMax) {
+    kp = p;
+    ki = i;
+    kd = d;
+    outputMin = outMin;
+    outputMax = outMax;
+    integralMin = intMin;
+    integralMax = intMax;
+    reset();
+  }
+
+  void reset() {
+    integral = 0.0f;
+    lastError = 0.0f;
+    lastTime = millis();
+  }
+
+  // Compute PID output given current position
+  float compute(float current, float dt) {
+    float error = setpoint - current;
+
+    // Proportional term
+    float pTerm = kp * error;
+
+    // Integral term with anti-windup
+    integral += error * dt;
+    integral = constrain(integral, integralMin, integralMax);
+    float iTerm = ki * integral;
+
+    // Derivative term
+    float dTerm = 0.0f;
+    if (dt > 0.0f) {
+      float derivative = (error - lastError) / dt;
+      dTerm = kd * derivative;
+    }
+
+    lastError = error;
+
+    // Total output
+    float output = pTerm + iTerm + dTerm;
+    return constrain(output, outputMin, outputMax);
+  }
+};
+
+// PID controllers for each motor
+PIDController pidMotor[3];
+
+BTS7960 motor[3] = {
+  { M1_RPWM, M1_LPWM, M1_REN, M1_LEN, -1, -1 },
+  { M2_RPWM, M2_LPWM, M2_REN, M2_LEN, -1, -1 },
+  { M3_RPWM, M3_LPWM, M3_REN, M3_LEN, -1, -1 },
+};
+
+// Reserve 6 LEDC channels (2 per motor), choose arbitrary distinct IDs [0..15]
+static const int CH_M1_R = 0;
+static const int CH_M1_L = 1;
+static const int CH_M2_R = 2;
+static const int CH_M2_L = 3;
+static const int CH_M3_R = 4;
+static const int CH_M3_L = 5;
+
+// ===================== ENCODER HELPER FUNCTIONS =====================
+
+// Read encoder position safely (atomic read)
+long getEncoderPosition(int motorIndex) {
+  noInterrupts();
+  long pos = encoderPos[motorIndex];
+  interrupts();
+  return pos;
+}
+
+// Reset encoder position
+void resetEncoderPosition(int motorIndex) {
+  noInterrupts();
+  encoderPos[motorIndex] = 0;
+  interrupts();
+}
+
+// Convert encoder counts to degrees
+float countsToDegrees(long counts) {
+  return (counts / COUNTS_PER_REV) * 360.0f;
+}
+
+// Convert encoder counts to revolutions
+float countsToRevolutions(long counts) {
+  return counts / COUNTS_PER_REV;
+}
+
+// ===================== CLOSED-LOOP POSITION CONTROL =====================
+
+// Runs one complete sine cycle on a motor using PID position control.
+// The sine wave generates the desired position setpoint (in encoder counts).
+// The PID controller adjusts motor speed to track this position.
+void runSineCycle(BTS7960& m, int motorIndex) {
+  const float TWO_PI_F = 2.0f * (float)M_PI;
+  const uint32_t totalDurationMs = SINE_DURATION_MS;
+  const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
+
+  // Reset encoder and PID state at start
+  resetEncoderPosition(motorIndex);
+  pidMotor[motorIndex].reset();
+
+  // Calculate total position swing (in counts)
+  // For one sine cycle, motor position goes: 0 -> +peak -> 0 -> -peak -> 0
+  // We'll define peak amplitude in revolutions, then convert to counts
+  const float amplitudeRevolutions = 2.0f; // Adjust to desired swing (e.g., 2 full rotations)
+  const float amplitudeCounts = amplitudeRevolutions * COUNTS_PER_REV;
+
+  unsigned long startTime = millis();
+  unsigned long lastPidTime = startTime;
+  unsigned long lastLogTime = startTime;
+  
+  const int sensorBitBase = motorIndex * 2;
+
+  Serial.printf("Motor %d: Starting closed-loop sine trajectory (%.1f rev amplitude)\n", 
+                motorIndex + 1, amplitudeRevolutions);
+
+  while (millis() - startTime < totalDurationMs) {
+    unsigned long now = millis();
+    
+    // Check limit sensors
+    noInterrupts();
+    uint8_t flags = sensorFlags;
+    interrupts();
+    if (flags & ((1 << sensorBitBase) | (1 << (sensorBitBase + 1)))) {
+      Serial.printf("** Sensor triggered for motor %d -> stopping\n", motorIndex + 1);
+      m.coast();
+      noInterrupts();
+      sensorFlags &= ~((1 << sensorBitBase) | (1 << (sensorBitBase + 1)));
+      interrupts();
+      return;
+    }
+
+    // PID runs at fixed rate
+    if (now - lastPidTime >= PID_SAMPLE_TIME_MS) {
+      float elapsed = (now - startTime) / 1000.0f; // seconds
+      float progress = elapsed / (totalDurationMs / 1000.0f); // 0..1
+
+      // Generate setpoint from sine wave
+      float theta = TWO_PI_F * progress;
+      float sineValue = sinf(theta); // -1..+1
+      float targetPosition = sineValue * amplitudeCounts; // desired encoder counts
+
+      // Read current encoder position
+      long currentPosition = getEncoderPosition(motorIndex);
+
+      // Update PID setpoint and compute control output
+      pidMotor[motorIndex].setpoint = targetPosition;
+      float pidOutput = pidMotor[motorIndex].compute((float)currentPosition, pidSampleTimeS);
+
+      // Convert PID output to motor command
+      // PID output is signed: positive = forward, negative = reverse
+      Dir direction = (pidOutput >= 0.0f) ? FORWARD : REVERSE;
+      int duty = (int)constrain(fabsf(pidOutput), 0.0f, (float)PWM_MAX);
+
+      m.set(duty, direction);
+
+      // Optional: log progress every 500ms
+      if (now - lastLogTime > 500) {
+        float positionDeg = countsToDegrees(currentPosition);
+        float targetDeg = countsToDegrees((long)targetPosition);
+        float error = targetPosition - currentPosition;
+        Serial.printf("M%d | Target: %.1f° | Current: %.1f° | Error: %.0f counts | PWM: %d %s\n",
+                      motorIndex + 1, targetDeg, positionDeg, error, duty, 
+                      (direction == FORWARD) ? "FWD" : "REV");
+        lastLogTime = now;
+      }
+
+      lastPidTime = now;
+    }
+
+    delay(1); // Small delay to prevent tight loop
+  }
+
+  // Graceful stop
+  m.coast();
+  long finalPos = getEncoderPosition(motorIndex);
+  Serial.printf("Motor %d: Cycle complete. Final position: %.2f revolutions\n", 
+                motorIndex + 1, countsToRevolutions(finalPos));
+}
+
+// ===================== ARDUINO SETUP/LOOP =====================
+
+void setup() {
+  // Initialize serial for logging
+  Serial.begin(115200);
+  delay(200);
+
+  Serial.println("\nESP32 + BTS7960: Sequential Sine Profiles");
+
+  // Initialize each motor with its channels
+  motor[0].begin(CH_M1_R, CH_M1_L);
+  motor[1].begin(CH_M2_R, CH_M2_L);
+  motor[2].begin(CH_M3_R, CH_M3_L);
+
+  // Configure limit sensors
+  pinMode(S_M1_F, INPUT_PULLUP);
+  pinMode(S_M1_R, INPUT_PULLUP);
+  pinMode(S_M2_F, INPUT_PULLUP);
+  pinMode(S_M2_R, INPUT_PULLUP);
+  pinMode(S_M3_F, INPUT_PULLUP);
+  pinMode(S_M3_R, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(S_M1_F), sensorISR0, FALLING);
+  attachInterrupt(digitalPinToInterrupt(S_M1_R), sensorISR1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(S_M2_F), sensorISR2, FALLING);
+  attachInterrupt(digitalPinToInterrupt(S_M2_R), sensorISR3, FALLING);
+  attachInterrupt(digitalPinToInterrupt(S_M3_F), sensorISR4, FALLING);
+  attachInterrupt(digitalPinToInterrupt(S_M3_R), sensorISR5, FALLING);
+
+  // Configure encoder pins (INPUT for reading quadrature signals)
+  pinMode(ENC_M1_A, INPUT);
+  pinMode(ENC_M1_B, INPUT);
+  pinMode(ENC_M2_A, INPUT);
+  pinMode(ENC_M2_B, INPUT);
+  pinMode(ENC_M3_A, INPUT);
+  pinMode(ENC_M3_B, INPUT);
+
+  // Attach encoder interrupts (trigger on CHANGE of channel A)
+  attachInterrupt(digitalPinToInterrupt(ENC_M1_A), encoderISR_M1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_M2_A), encoderISR_M2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_M3_A), encoderISR_M3, CHANGE);
+
+  // Initialize PID controllers
+  for (int i = 0; i < 3; i++) {
+    pidMotor[i].init(PID_KP, PID_KI, PID_KD, 
+                     -PID_OUTPUT_LIMIT, PID_OUTPUT_LIMIT,
+                     -PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
+  }
+
+  Serial.println("PID Controllers initialized:");
+  Serial.printf("  Kp=%.2f, Ki=%.2f, Kd=%.2f\n", PID_KP, PID_KI, PID_KD);
+  Serial.printf("  Encoder PPR=%d, Counts/Rev=%.0f\n", ENCODER_PPR, COUNTS_PER_REV);
+  Serial.printf("  PID Sample Rate: %.1fms (%.0fHz)\n", PID_SAMPLE_TIME_MS, 1000.0f/PID_SAMPLE_TIME_MS);
+  // Optional: small startup pause
+  delay(500);
+}
+
+void loop() {
+  // Motor 1 -> Motor 2 -> Motor 3, sequentially
+  // Debug: print current encoder positions before starting cycles
+  {
+    long e0 = getEncoderPosition(0);
+    long e1 = getEncoderPosition(1);
+    long e2 = getEncoderPosition(2);
+    Serial.printf("Enc counts: M1=%ld, M2=%ld, M3=%ld  | deg: M1=%.1f, M2=%.1f, M3=%.1f\n",
+                  e0, e1, e2, countsToDegrees(e0), countsToDegrees(e1), countsToDegrees(e2));
+  }
+  Serial.println("Motor 1: sine cycle");
+  runSineCycle(motor[0], 0);
+  delay(PAUSE_BETWEEN_MS);
+
+  Serial.println("Motor 2: sine cycle");
+  runSineCycle(motor[1], 1);
+  delay(PAUSE_BETWEEN_MS);
+
+  Serial.println("Motor 3: sine cycle");
+  runSineCycle(motor[2], 2);
+  delay(PAUSE_BETWEEN_MS);
+
+  noInterrupts();
+  uint8_t pending = sensorFlags;
+  interrupts();
+  if (pending) {
+    for (int i = 0; i < 3; ++i) {
+      uint8_t mask = (1 << (i * 2)) | (1 << (i * 2 + 1));
+      if (pending & mask) {
+        Serial.printf("Sensor triggered for motor %d outside run -> stopping\n", i + 1);
+        motor[i].coast();
+        noInterrupts();
+        sensorFlags &= ~mask;
+        interrupts();
+      }
+    }
+  }
+  // Repeat forever
+}
