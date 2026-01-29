@@ -10,6 +10,8 @@
 #include "PIDController.h"
 #include "LimitSensors.h"
 #include "MotionControl.h"
+#include "ButtonInput.h"
+#include "ForceControl.h"
 
 // ===================== MOTOR INSTANCES =====================
 BTS7960 motor[3] = {
@@ -17,6 +19,19 @@ BTS7960 motor[3] = {
   BTS7960(M2_RPWM, M2_LPWM, M2_REN, M2_LEN),
   BTS7960(M3_RPWM, M3_LPWM, M3_REN, M3_LEN)
 };
+
+// ===================== PATTERN SELECTION =====================
+// Change this value to select motion pattern:
+// 1 = Sequential (one motor at a time)
+// 2 = Phase offset (M1 & M3 simultaneous, M2 delayed start)
+// 3 = Cascading half-cycle (sequential with hold states)
+// 4 = Sequential-then-parallel (sequential ascent, simultaneous descent)
+MotionControl::MotionPattern currentPattern = MotionControl::PATTERN_SEQUENTIAL;
+
+// ===================== FORCE CONTROL MODE =====================
+// Set to true to enable outer force PID loop (amplitude controlled by force sensor)
+// Set to false to use manual amplitude from buttons
+bool useForceControl = true;
 
 // ===================== SETUP =====================
 void setup() {
@@ -46,27 +61,92 @@ void setup() {
   MotionControl::begin();
   Serial.println("✓ Motion control initialized\n");
 
+  // Initialize button input
+  ButtonInput::begin();
+  Serial.println("✓ Button input initialized");
+
+  // Initialize force control (outer PID loop)
+  ForceControl::begin();
+  ForceControl::setEnabled(useForceControl);
+  Serial.println("✓ Force control initialized\n");
+
+  // Print control mode
+  if (useForceControl) {
+    Serial.println(">>> FORCE CONTROL MODE: Amplitude from force sensor <<<");
+    Serial.printf("    Force setpoint: %.1f N\n", ForceControl::getForceSetpoint());
+  } else {
+    Serial.println(">>> MANUAL MODE: Amplitude from buttons <<<");
+    Serial.printf("    Initial amplitude: %.1f revolutions\n", ButtonInput::getAmplitude());
+  }
+  Serial.println();
+
   delay(500);
 }
 
 // ===================== MAIN LOOP =====================
 void loop() {
-  // Print encoder positions before starting
-  EncoderModule::printPositions();
-
-  // Motor 1 -> Motor 2 -> Motor 3, sequentially
-  Serial.println("\n--- Motor 1: sine cycle ---");
-  MotionControl::runSineCycle(motor[0], 0, 1.0f); // 5 revolutions amplitude
-  delay(PAUSE_BETWEEN_MS);
-
-  Serial.println("\n--- Motor 2: sine cycle ---");
-  MotionControl::runSineCycle(motor[1], 1, 5.0f);
-  delay(PAUSE_BETWEEN_MS);
-
-  Serial.println("\n--- Motor 3: sine cycle ---");
-  MotionControl::runSineCycle(motor[2], 2, 1.0f);
-  delay(PAUSE_BETWEEN_MS);
-
+  // Sequence counter for force control (first sequence uses initial amplitude)
+  static int sequenceCount = 0;
+  
+  // Update button input (always update for manual mode or setpoint adjustment)
+  ButtonInput::update();
+  
+  // Determine amplitude based on control mode
+  float amplitude;
+  
+  if (useForceControl && ForceControl::isEnabled()) {
+    // SEQUENCE-BASED FORCE CONTROL:
+    // - First sequence: Use initial amplitude
+    // - Subsequent sequences: Use amplitude computed from previous sequence's peak force
+    
+    if (sequenceCount == 0) {
+      // First sequence: use initial amplitude
+      amplitude = ForceControl::getInitialAmplitude();
+      Serial.printf("[Force Control] First sequence - Initial amplitude: %.2f rev\n", amplitude);
+    } else {
+      // Use amplitude computed from previous sequence
+      amplitude = ForceControl::getDesiredRevolutions();
+    }
+    
+    // Start tracking peak force for this sequence
+    ForceControl::startPeakTracking();
+    
+  } else {
+    // MANUAL MODE: Get amplitude from button input
+    amplitude = ButtonInput::getAmplitude();
+  }
+  
+  // Execute selected motion pattern (INNER LOOP uses amplitude)
+  switch (currentPattern) {
+    case MotionControl::PATTERN_SEQUENTIAL:
+      MotionControl::executePattern1(motor, amplitude);
+      break;
+      
+    case MotionControl::PATTERN_PHASE_OFFSET:
+      MotionControl::executePattern2(motor, amplitude);
+      break;
+      
+    case MotionControl::PATTERN_CASCADING:
+      MotionControl::executePattern3(motor, amplitude);
+      break;
+      
+    case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
+      MotionControl::executePattern4(motor, amplitude);
+      break;
+      
+    default:
+      Serial.println("ERROR: Invalid pattern selected!");
+      delay(1000);
+      break;
+  }
+  
+  // After pattern completes, compute next amplitude based on peak force
+  if (useForceControl && ForceControl::isEnabled()) {
+    float nextAmplitude = ForceControl::computeNextAmplitude();
+    Serial.printf("[Force Control] Computed amplitude for next sequence: %.2f rev\n\n", nextAmplitude);
+    sequenceCount++;
+  }
+  
   // Safety check: handle any sensor triggers that occurred during pauses
   LimitSensors::checkPendingTriggers();
 

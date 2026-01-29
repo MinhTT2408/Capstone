@@ -24,32 +24,33 @@ static const int M1_REN  = -1;    // set to -1 if hard-wired HIGH
 static const int M1_LEN  = -1;    // set to -1 if hard-wired HIGH
 
 // Motor 2 pins
-static const int M2_RPWM = 32;   // Changed from 34 (34 is input-only, cannot output PWM)
-static const int M2_LPWM = 33;   // Changed from 35 (35 is input-only, cannot output PWM)
+static const int M2_RPWM = 32;   
+static const int M2_LPWM = 33;   
 static const int M2_REN  = -1;
 static const int M2_LEN  = -1;
 
 // Motor 3 pins
-static const int M3_RPWM = 16;  // Changed from 34 (input-only)
-static const int M3_LPWM = 17;  // Changed from 35 (input-only)
+static const int M3_RPWM = 12; 
+static const int M3_LPWM = 13;  
 static const int M3_REN  = -1;
 static const int M3_LEN  = -1;
 
-// Limit sensor pins
-static const int S_M1_F = 13;  // Changed from 50 (doesn't exist)
-static const int S_M1_R = 12;  // Changed from 51 (doesn't exist)
-static const int S_M2_F = 34;
-static const int S_M2_R = 35;
-static const int S_M3_F = 36;
-static const int S_M3_R = 21;
+// Limit sensor pins (one per motor)
+static const int S_M1 = 15;
+static const int S_M2 = 21;
+static const int S_M3 = 14;
 
 // Encoder pins (quadrature encoders: A and B channels)
-static const int ENC_M1_A = 22; // Input-only pin (OK for encoder)
-static const int ENC_M1_B = 23; // Input-only pin (OK for encoder)
-static const int ENC_M2_A = 18; // Input-only pin (OK for encoder) - moved from motor PWM
-static const int ENC_M2_B = 19; // Input-only pin (OK for encoder) - moved from motor PWM
-static const int ENC_M3_A = 14; // Changed from 65 (doesn't exist)
-static const int ENC_M3_B = 15; // Changed from 66 (doesn't exist)
+static const int ENC_M1_A = 22; 
+static const int ENC_M1_B = 23; 
+static const int ENC_M2_A = 18;  
+static const int ENC_M2_B = 19; 
+static const int ENC_M3_A = 34; 
+static const int ENC_M3_B = 35; 
+
+// Button input pins
+static const int BTN_INCREASE_PIN = 27; // Button to increase amplitude
+static const int BTN_DECREASE_PIN = 4;  // Button to decrease amplitude
 
 // ===================== ENCODER CONFIGURATION =====================
 static const int ENCODER_PPR = 2125;        // Pulses Per Revolution (adjust to your encoder)
