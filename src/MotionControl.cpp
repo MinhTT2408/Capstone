@@ -3,8 +3,8 @@
 #include "config.h"
 #include "Encoder.h"
 #include "LimitSensors.h"
-#include "ButtonInput.h"
 #include "ForceControl.h"
+#include "PPGModule.h"
 #include <math.h>
 
 namespace MotionControl {
@@ -123,8 +123,12 @@ void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions) {
   while (millis() - startTime < totalDurationMs) {
     unsigned long now = millis();
     
-    // Update button input during motion
-    ButtonInput::update();
+    // Check BLE stop request (session ended mid-cycle)
+    if (PPGModule::stopMotorRequested) {
+      Serial.printf("[Motor %d] BLE stop requested -> aborting\n", motorIndex + 1);
+      motor.coast();
+      return;
+    }
     
     // Check limit sensors
     if (LimitSensors::isTriggered(motorIndex)) {
@@ -252,8 +256,12 @@ void executePattern2(BTS7960 motors[], float amplitude) {
   while (millis() - globalStartTime < totalDuration) {
     unsigned long now = millis();
     
-    // Update button input
-    ButtonInput::update();
+    // Check BLE stop request
+    if (PPGModule::stopMotorRequested) {
+      Serial.println("[Pattern 2] BLE stop requested -> aborting");
+      for (int j = 0; j < 3; j++) motors[j].coast();
+      return;
+    }
     
     // Check limit sensors for all motors
     for (int i = 0; i < 3; i++) {
@@ -406,8 +414,12 @@ void executePattern3(BTS7960 motors[], float amplitude) {
   while (currentTimeStep < totalSteps) {
     unsigned long now = millis();
     
-    // Update button input
-    ButtonInput::update();
+    // Check BLE stop request
+    if (PPGModule::stopMotorRequested) {
+      Serial.println("[Pattern 3] BLE stop requested -> aborting");
+      for (int j = 0; j < 3; j++) motors[j].coast();
+      return;
+    }
     
     // Check if it's time to advance to next time step
     if (now - stepStartTime >= halfCycleDuration) {
@@ -559,8 +571,12 @@ void executePattern4(BTS7960 motors[], float amplitude) {
   while (currentPhase < 5) {
     unsigned long now = millis();
     
-    // Update button input
-    ButtonInput::update();
+    // Check BLE stop request
+    if (PPGModule::stopMotorRequested) {
+      Serial.println("[Pattern 4] BLE stop requested -> aborting");
+      for (int j = 0; j < 3; j++) motors[j].coast();
+      return;
+    }
     
     // Check limit sensors
     for (int i = 0; i < 3; i++) {

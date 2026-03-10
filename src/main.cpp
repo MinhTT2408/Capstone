@@ -10,8 +10,8 @@
 #include "PIDController.h"
 #include "LimitSensors.h"
 #include "MotionControl.h"
-#include "ButtonInput.h"
 #include "ForceControl.h"
+#include "PPGModule.h"
 
 // ===================== MOTOR INSTANCES =====================
 BTS7960 motor[3] = {
@@ -30,7 +30,7 @@ MotionControl::MotionPattern currentPattern = MotionControl::PATTERN_SEQUENTIAL;
 
 // ===================== FORCE CONTROL MODE =====================
 // Set to true to enable outer force PID loop (amplitude controlled by force sensor)
-// Set to false to use manual amplitude from buttons
+// Set to false to use default amplitude (DEFAULT_AMPLITUDE_REV in config.h)
 bool useForceControl = true;
 
 // ===================== SETUP =====================
@@ -61,22 +61,22 @@ void setup() {
   MotionControl::begin();
   Serial.println("✓ Motion control initialized\n");
 
-  // Initialize button input
-  ButtonInput::begin();
-  Serial.println("✓ Button input initialized");
-
   // Initialize force control (outer PID loop)
   ForceControl::begin();
   ForceControl::setEnabled(useForceControl);
   Serial.println("✓ Force control initialized\n");
+
+  // Initialize PPG sensor + BLE
+  PPGModule::begin();
+  Serial.println("✓ PPG + BLE initialized\n");
 
   // Print control mode
   if (useForceControl) {
     Serial.println(">>> FORCE CONTROL MODE: Amplitude from force sensor <<<");
     Serial.printf("    Force setpoint: %.1f N\n", ForceControl::getForceSetpoint());
   } else {
-    Serial.println(">>> MANUAL MODE: Amplitude from buttons <<<");
-    Serial.printf("    Initial amplitude: %.1f revolutions\n", ButtonInput::getAmplitude());
+    Serial.println(">>> DEFAULT AMPLITUDE MODE <<<");
+    Serial.printf("    Amplitude: %.1f revolutions\n", DEFAULT_AMPLITUDE_REV);
   }
   Serial.println();
 
@@ -88,52 +88,120 @@ void loop() {
   // Sequence counter for force control (first sequence uses initial amplitude)
   static int sequenceCount = 0;
   
-  // Update button input (always update for manual mode or setpoint adjustment)
-  ButtonInput::update();
+  // Always process PPG sensor reads + BLE events every iteration
+  PPGModule::update();
+  
+  // ---- BLE SESSION MODE ----
+  // When BLE session is active, level 1-4 sets the force setpoint.
+  // ForceControl PID computes amplitude (revolutions) from force error.
+  if (PPGModule::isSessionActive()) {
+    int level = PPGModule::getCompressionLevel();
+    
+    // Track level changes and update force setpoint accordingly
+    static int lastBleLevel = 0;
+    if (level != lastBleLevel && level >= 1 && level <= NUM_LEVELS) {
+      ForceControl::setEnabled(true);
+      ForceControl::setForceSetpoint(LEVEL_FORCE_SETPOINT[level]);
+      sequenceCount = 0;  // Reset so initial amplitude is used with new setpoint
+      lastBleLevel = level;
+      Serial.printf("[BLE Session] Level %d -> Force setpoint: %.1f N\n",
+                    level, LEVEL_FORCE_SETPOINT[level]);
+    }
+    // Reset tracking when session ends
+    if (PPGModule::sessionJustEnded()) {
+      lastBleLevel = 0;
+    }
+    
+    if (level >= 1 && level <= NUM_LEVELS) {
+      // Determine amplitude via ForceControl PID
+      float amplitude;
+      if (sequenceCount == 0) {
+        amplitude = ForceControl::getInitialAmplitude();
+        Serial.printf("[BLE Session] First sequence - Initial amplitude: %.2f rev\n", amplitude);
+      } else {
+        amplitude = ForceControl::getDesiredRevolutions();
+      }
+      
+      // Clear stop flag before starting pattern
+      PPGModule::stopMotorRequested = false;
+      
+      // Start peak force tracking for this sequence
+      ForceControl::startPeakTracking();
+      
+      Serial.printf("[BLE Session] Level %d | Force SP: %.1f N | Measured: %.1f N | Amplitude: %.2f rev\n",
+                    level, ForceControl::getForceSetpoint(), ForceControl::getLastMeasuredForce(), amplitude);
+      
+      // Execute selected motion pattern
+      switch (currentPattern) {
+        case MotionControl::PATTERN_SEQUENTIAL:
+          MotionControl::executePattern1(motor, amplitude);
+          break;
+        case MotionControl::PATTERN_PHASE_OFFSET:
+          MotionControl::executePattern2(motor, amplitude);
+          break;
+        case MotionControl::PATTERN_CASCADING:
+          MotionControl::executePattern3(motor, amplitude);
+          break;
+        case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
+          MotionControl::executePattern4(motor, amplitude);
+          break;
+        default:
+          Serial.println("ERROR: Invalid pattern!");
+          delay(1000);
+          break;
+      }
+      
+      // After pattern completes, compute next amplitude from peak force vs setpoint
+      float nextAmplitude = ForceControl::computeNextAmplitude();
+      Serial.printf("[BLE Session] Next amplitude: %.2f rev\n", nextAmplitude);
+      sequenceCount++;
+      
+      // Safety check
+      LimitSensors::checkPendingTriggers();
+      
+      // Brief pause between cycles (keep processing BLE during wait)
+      unsigned long waitStart = millis();
+      while (millis() - waitStart < 1000) {
+        PPGModule::update();
+        if (PPGModule::stopMotorRequested || !PPGModule::isSessionActive()) break;
+        delay(10);
+      }
+    }
+    return;  // Stay in BLE session mode
+  }
+  
+  // ---- STANDALONE MODE (no BLE session) ----
+  // Original behavior: force control or manual button control
   
   // Determine amplitude based on control mode
   float amplitude;
   
   if (useForceControl && ForceControl::isEnabled()) {
-    // SEQUENCE-BASED FORCE CONTROL:
-    // - First sequence: Use initial amplitude
-    // - Subsequent sequences: Use amplitude computed from previous sequence's peak force
-    
     if (sequenceCount == 0) {
-      // First sequence: use initial amplitude
       amplitude = ForceControl::getInitialAmplitude();
       Serial.printf("[Force Control] First sequence - Initial amplitude: %.2f rev\n", amplitude);
     } else {
-      // Use amplitude computed from previous sequence
       amplitude = ForceControl::getDesiredRevolutions();
     }
-    
-    // Start tracking peak force for this sequence
     ForceControl::startPeakTracking();
-    
   } else {
-    // MANUAL MODE: Get amplitude from button input
-    amplitude = ButtonInput::getAmplitude();
+    amplitude = DEFAULT_AMPLITUDE_REV;
   }
   
-  // Execute selected motion pattern (INNER LOOP uses amplitude)
+  // Execute selected motion pattern
   switch (currentPattern) {
     case MotionControl::PATTERN_SEQUENTIAL:
       MotionControl::executePattern1(motor, amplitude);
       break;
-      
     case MotionControl::PATTERN_PHASE_OFFSET:
       MotionControl::executePattern2(motor, amplitude);
       break;
-      
     case MotionControl::PATTERN_CASCADING:
       MotionControl::executePattern3(motor, amplitude);
       break;
-      
     case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
       MotionControl::executePattern4(motor, amplitude);
       break;
-      
     default:
       Serial.println("ERROR: Invalid pattern selected!");
       delay(1000);
@@ -147,10 +215,9 @@ void loop() {
     sequenceCount++;
   }
   
-  // Safety check: handle any sensor triggers that occurred during pauses
+  // Safety check
   LimitSensors::checkPendingTriggers();
-
-  // Repeat forever
+  
   Serial.println("\n========== Cycle complete, repeating... ==========\n");
   delay(1000);
 }

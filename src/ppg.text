@@ -1,0 +1,317 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+
+// ===== 1. PIN DEFINITIONS =====
+#define I2C_SDA 15
+#define I2C_SCL 14  
+#define LED_PIN  2  
+
+#define SD_CS    10 
+#define SD_MOSI  11 
+#define SD_SCK   12 
+#define SD_MISO  13 
+
+// ===== 2. SECURITY (XOR CIPHER) =====
+const char ENCRYPTION_KEY = 0x5A; 
+
+// ===== 3. BLE UUIDS =====
+#define SERVICE_UUID        "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+#define PPG_CHAR_UUID       "6e400002-b5a3-f393-e0a9-e50e24dcca9e" 
+#define LEVEL_CHAR_UUID     "6e400003-b5a3-f393-e0a9-e50e24dcca9e" 
+#define HISTORY_CHAR_UUID   "6e400004-b5a3-f393-e0a9-e50e24dcca9e" 
+
+BLECharacteristic *pPPGCharacteristic;
+BLECharacteristic *pLevelCharacteristic;
+BLECharacteristic *pHistoryCharacteristic;
+
+bool deviceConnected = false;
+volatile int compressionLevel = 0;
+
+// ===== 4. RTOS SAFETY FLAGS =====
+volatile bool fetchHistoryRequested = false;
+volatile bool startSessionRequested = false;
+volatile bool endSessionRequested = false;
+
+// ===== 5. SENSOR & LOGGING VARIABLES =====
+MAX30105 particleSensor;
+float currentPPG = 0;
+
+unsigned long lastBleTime = 0;
+const unsigned long bleInterval = 20; // 50Hz
+
+unsigned long lastSdWriteTime = 0;
+const unsigned long sdWriteInterval = 500; // Save twice a second
+
+bool isSessionActive = false;   
+unsigned long runStartTime = 0; 
+unsigned long lastBlinkTime = 0;
+bool ledState = false;
+
+// Analytics for Summary
+String currentFilename = "";
+double sumPPG = 0;
+long countPPG = 0;
+
+// ===== 6. HELPER: ENCRYPTION =====
+String xorCipher(String input) {
+  String output = input;
+  for (int i = 0; i < input.length(); i++) {
+    if (input[i] != '\n' && input[i] != '\r') {
+      output[i] = input[i] ^ ENCRYPTION_KEY;
+    }
+  }
+  return output;
+}
+
+// ===== 7. HELPER: SD CARD MANAGEMENT =====
+String getNextFilename() {
+  char filename[16];
+  for (int i = 1; i <= 9999; i++) {
+    snprintf(filename, sizeof(filename), "/%04d.csv", i);
+    if (!SD.exists(filename)) {
+      return String(filename);
+    }
+  }
+  return "/overflow.csv";
+}
+
+void logToSD(String filename, String data) {
+  File file = SD.open(filename, FILE_APPEND);
+  if (file) {
+    file.println(xorCipher(data));
+    file.close();
+  } else {
+    Serial.println("Error writing to SD");
+  }
+}
+
+// ===== 8. HELPER: SESSION CONTROL =====
+void startNewSession() {
+  currentFilename = getNextFilename();
+  Serial.println("--- NEW SESSION: " + currentFilename + " ---");
+  
+  sumPPG = 0;
+  countPPG = 0;
+  runStartTime = millis();
+  isSessionActive = true;
+  
+  logToSD(currentFilename, "TimeMs,PPG,Level");
+}
+
+void endSession() {
+  if (!isSessionActive || currentFilename == "") return;
+  
+  Serial.println("--- ENDING SESSION ---");
+  isSessionActive = false;
+  
+  // Calculate Stats
+  float avg = (countPPG > 0) ? (sumPPG / countPPG) : 0;
+  unsigned long duration = millis() - runStartTime;
+  
+  // Save to history.txt
+  File file = SD.open("/history.txt", FILE_APPEND);
+  if (file) {
+    String cleanName = currentFilename;
+    cleanName.replace("/", ""); cleanName.replace(".csv", "");
+    String plainText = "ID:" + cleanName + ",Time:" + String(duration/1000) + "s,Avg:" + String(avg, 1);
+    file.println(xorCipher(plainText));
+    file.close();
+    Serial.println("Saved Summary: " + plainText);
+  }
+  currentFilename = ""; 
+}
+
+// ===== 9. HELPER: SEND HISTORY OVER BLE =====
+void processHistoryRequest() {
+  if (!SD.exists("/history.txt")) {
+    Serial.println("No history file found.");
+    return;
+  }
+
+  File file = SD.open("/history.txt", FILE_READ);
+  Serial.println("--- Sending History to App ---");
+  
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      String decryptedLine = xorCipher(line);
+      
+      if (deviceConnected) {
+        pHistoryCharacteristic->setValue(decryptedLine.c_str());
+        pHistoryCharacteristic->notify();
+        Serial.println("Sent: " + decryptedLine);
+      }
+      delay(50); // Prevent BLE buffer overflow
+    }
+  }
+  file.close();
+  Serial.println("--- End of History ---");
+}
+
+// ===== 10. BLE CALLBACKS =====
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    deviceConnected = true;
+    Serial.println("BLE Connected");
+  };
+
+  void onDisconnect(BLEServer* pServer) override {
+    deviceConnected = false;
+    Serial.println("BLE Disconnected");
+    
+    // Raise flag safely instead of direct call
+    if (isSessionActive) {
+      endSessionRequested = true; 
+    }
+    BLEDevice::startAdvertising();
+  }
+};
+
+class LevelCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    std::string value = pCharacteristic->getValue();
+    if (!value.empty()) {
+      int newLevel = value[0];
+      Serial.printf("Received Raw Level: %d\n", newLevel);
+
+      // Raise flags safely instead of executing heavy SD tasks here
+      if (newLevel == 99) {
+        fetchHistoryRequested = true; 
+      } 
+      else if (newLevel == 0) {
+        endSessionRequested = true; 
+        compressionLevel = 0;
+      } 
+      else if (newLevel > 0 && newLevel <= 4) {
+        if (!isSessionActive) {
+          startSessionRequested = true; 
+        }
+        compressionLevel = newLevel;
+      }
+    }
+  }
+};
+
+// ===== 11. SETUP =====
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  // Init Sensor
+  Wire.begin(I2C_SDA, I2C_SCL);
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30105 not found.");
+  } else {
+    particleSensor.setup(0x1F, 4, 2, 400, 411, 4096); 
+  }
+
+  // Init SD Card
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("SD Card Mount Failed!");
+  } else {
+    Serial.println("SD Card Ready.");
+  }
+
+  // Init BLE
+  BLEDevice::init("ESP32_PPG_DVT");
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pPPGCharacteristic = pService->createCharacteristic(PPG_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  pPPGCharacteristic->addDescriptor(new BLE2902());
+
+  pLevelCharacteristic = pService->createCharacteristic(LEVEL_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pLevelCharacteristic->setCallbacks(new LevelCallbacks());
+
+  pHistoryCharacteristic = pService->createCharacteristic(HISTORY_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  pHistoryCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+  BLEDevice::getAdvertising()->addServiceUUID(SERVICE_UUID);
+  BLEDevice::getAdvertising()->start();
+
+  Serial.println("UNIFIED NODE READY.");
+}
+
+// ===== 12. MAIN LOOP =====
+float dc = 0;
+bool dcInitialized = false;
+
+void loop() {
+  unsigned long now = millis();
+
+  // --- HANDLE ALL BLE REQUESTS SAFELY IN MAIN THREAD ---
+  if (fetchHistoryRequested) {
+    fetchHistoryRequested = false;
+    processHistoryRequest();
+  }
+  if (startSessionRequested) {
+    startSessionRequested = false;
+    startNewSession();
+  }
+  if (endSessionRequested) {
+    endSessionRequested = false;
+    endSession();
+  }
+  // -----------------------------------------------------
+
+  // 1. Read Sensor
+  long irValue = particleSensor.getIR();
+  if (!dcInitialized) { dc = irValue; dcInitialized = true; }
+  dc = 0.95 * dc + 0.05 * irValue;
+  float ac = irValue - dc;
+  currentPPG = ac * 2.0 + 500;
+  currentPPG = constrain(currentPPG, 0, 1000);
+
+  // 2. BLE Real-time Graph Send
+  if (now - lastBleTime >= bleInterval) {
+    lastBleTime = now;
+    if (deviceConnected) {
+       pPPGCharacteristic->setValue((uint8_t*)&currentPPG, sizeof(float));
+       pPPGCharacteristic->notify();
+    }
+  }
+
+  // 3. SD Card Logging
+  if (isSessionActive && (now - lastSdWriteTime >= sdWriteInterval)) {
+    lastSdWriteTime = now;
+    
+    sumPPG += currentPPG;
+    countPPG++;
+
+    String logEntry = String(now - runStartTime) + "," + 
+                      String(currentPPG) + "," + 
+                      String(compressionLevel);
+    
+    logToSD(currentFilename, logEntry);
+  }
+
+  // 4. LED Logic
+  if (deviceConnected && compressionLevel > 0 && compressionLevel <= 4) {
+      int blinkDelay = (compressionLevel == 4) ? 200 : 
+                       (compressionLevel == 3) ? 400 : 
+                       (compressionLevel == 2) ? 700 : 1000;
+      
+      if (!ledState && (now - lastBlinkTime >= blinkDelay)) {
+        digitalWrite(LED_PIN, HIGH); ledState = true; lastBlinkTime = now;
+      } else if (ledState && (now - lastBlinkTime >= 50)) {
+        digitalWrite(LED_PIN, LOW); ledState = false; lastBlinkTime = now;
+      }
+  } else {
+      digitalWrite(LED_PIN, LOW);
+  }
+}
