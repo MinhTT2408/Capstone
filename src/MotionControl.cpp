@@ -189,6 +189,7 @@ void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions) {
       lastPidTime = now;
     }
 
+    PPGModule::update(); // Keep PPG reads + BLE notify active during motor run
     delay(1); // Small delay to prevent tight loop
   }
 
@@ -354,7 +355,8 @@ void executePattern2(BTS7960 motors[], float amplitude) {
       
       lastPidTime = now;
     }
-    
+
+    PPGModule::update(); // Keep PPG reads + BLE notify active during motor run
     delay(1);
   }
   
@@ -520,7 +522,8 @@ void executePattern3(BTS7960 motors[], float amplitude) {
       
       lastPidTime = now;
     }
-    
+
+    PPGModule::update(); // Keep PPG reads + BLE notify active during motor run
     delay(1);
   }
   
@@ -659,7 +662,8 @@ void executePattern4(BTS7960 motors[], float amplitude) {
       
       lastPidTime = now;
     }
-    
+
+    PPGModule::update(); // Keep PPG reads + BLE notify active during motor run
     delay(1);
   }
   

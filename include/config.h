@@ -18,36 +18,36 @@ static const int      PWM_MAX    = (1 << PWM_RESBIT) - 1;
 // ===================== PIN MAP =====================
 
 // Motor 1 pins
-static const int M1_RPWM = 25;
-static const int M1_LPWM = 26;
+static const int M1_RPWM = 14;
+static const int M1_LPWM = 15;
 static const int M1_REN  = -1;    // set to -1 if hard-wired HIGH
 static const int M1_LEN  = -1;    // set to -1 if hard-wired HIGH
 
 // Motor 2 pins
-static const int M2_RPWM = 32;   
-static const int M2_LPWM = 33;   
+static const int M2_RPWM = 16;   
+static const int M2_LPWM = 21;   
 static const int M2_REN  = -1;
 static const int M2_LEN  = -1;
 
 // Motor 3 pins
-static const int M3_RPWM = 12; 
-static const int M3_LPWM = 13;  
+static const int M3_RPWM = 40; 
+static const int M3_LPWM = 41;  
 static const int M3_REN  = -1;
 static const int M3_LEN  = -1;
 
 // Limit sensor pins (one per motor)
 // NOTE: M1 moved from 15→21, M3 moved from 14→5 to free GPIO 14/15 for PPG I2C
-static const int S_M1 = 21;
-static const int S_M2 = 2;  // Moved from 21 (now used by M1 limit) to 36 (input-only, OK for limit sensor)
-static const int S_M3 = 5;
+static const int S_M1 = 7;
+static const int S_M2 = 8;  // Moved from 21 (now used by M1 limit) to 36 (input-only, OK for limit sensor)
+static const int S_M3 = 9;
 
 // Encoder pins (quadrature encoders: A and B channels)
-static const int ENC_M1_A = 22; 
-static const int ENC_M1_B = 23; 
-static const int ENC_M2_A = 18;  
-static const int ENC_M2_B = 19; 
-static const int ENC_M3_A = 34; 
-static const int ENC_M3_B = 35; 
+static const int ENC_M1_A = 42; 
+static const int ENC_M1_B = 2; 
+static const int ENC_M2_A = 1;  
+static const int ENC_M2_B = 3; 
+static const int ENC_M3_A = 47; 
+static const int ENC_M3_B = 48; 
 
 // ===================== ENCODER CONFIGURATION =====================
 static const int ENCODER_PPR = 2125;        // Pulses Per Revolution (adjust to your encoder)
@@ -76,8 +76,20 @@ static const int CH_M3_L = 5;
 
 // ===================== PPG / BLE CONFIGURATION =====================
 // MAX30105 PPG sensor I2C pins
-static const int PPG_I2C_SDA = 15;
-static const int PPG_I2C_SCL = 14;
+static const int PPG_I2C_SDA = 17;
+static const int PPG_I2C_SCL = 18;
+
+// SD Card SPI pins
+static const int SD_CS   = 10;
+static const int SD_MOSI = 11;
+static const int SD_SCK  = 12;
+static const int SD_MISO = 13;
+
+// SD Card logging rate during active session
+static const unsigned long SD_WRITE_INTERVAL_MS = 500;  // 2 Hz
+
+// XOR encryption key for SD card data
+static const char ENCRYPTION_KEY = 0x5A;
 
 // BLE UUIDs
 #define PPG_SERVICE_UUID        "6e400001-b5a3-f393-e0a9-e50e24dcca9e"

@@ -1,4 +1,4 @@
-// PPGModule.cpp - PPG sensor + BLE implementation
+// PPGModule.cpp - PPG sensor + BLE + SD card implementation
 #include "PPGModule.h"
 #include "config.h"
 #include <Wire.h>
@@ -7,6 +7,9 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
 
 namespace PPGModule {
 
@@ -44,6 +47,11 @@ static unsigned long sessionStartTime = 0;
 
 // Timing
 static unsigned long lastBleTime = 0;
+static unsigned long lastSdWriteTime = 0;
+
+// SD Card
+static bool sdAvailable = false;
+static String currentFilename;
 
 // Global stop flag for motor abort
 volatile bool stopMotorRequested = false;
@@ -96,6 +104,41 @@ class LevelCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// ===================== SD CARD HELPERS =====================
+
+static String xorCipher(const String &input) {
+  String output = input;
+  for (size_t i = 0; i < output.length(); i++) {
+    if (output[i] != '\n' && output[i] != '\r') {
+      output[i] = output[i] ^ ENCRYPTION_KEY;
+    }
+  }
+  return output;
+}
+
+static String getNextFilename() {
+  char filename[16];
+  for (int i = 1; i <= 9999; i++) {
+    snprintf(filename, sizeof(filename), "/%04d.csv", i);
+    if (!SD.exists(filename)) return String(filename);
+  }
+  return "/overflow.csv";
+}
+
+static void logToSD(float ppgValue) {
+  if (!sdAvailable || currentFilename.isEmpty()) return;
+
+  unsigned long elapsed = millis() - sessionStartTime;
+  String line = String(elapsed) + "," + String(ppgValue) + "," + String(compressionLevel);
+  String encrypted = xorCipher(line);
+
+  File f = SD.open(currentFilename, FILE_APPEND);
+  if (f) {
+    f.println(encrypted);
+    f.close();
+  }
+}
+
 // ===================== INTERNAL HELPERS =====================
 
 static void startNewSession() {
@@ -106,6 +149,22 @@ static void startNewSession() {
   _isSessionActive = true;
   _sessionJustStarted = true;
   stopMotorRequested = false;  // Clear any previous stop request
+
+  // Create new session file on SD
+  if (sdAvailable) {
+    currentFilename = getNextFilename();
+    File f = SD.open(currentFilename, FILE_WRITE);
+    if (f) {
+      // Write encrypted header
+      String header = "TimeMs,PPG,Level";
+      f.println(xorCipher(header));
+      f.close();
+      Serial.printf("[SD] Session file: %s\n", currentFilename.c_str());
+    } else {
+      Serial.println("[SD] Failed to create session file!");
+    }
+  }
+  lastSdWriteTime = millis();
 }
 
 static void doEndSession() {
@@ -120,24 +179,60 @@ static void doEndSession() {
   float avg = (countPPG > 0) ? (float)(sumPPG / countPPG) : 0;
   unsigned long duration = millis() - sessionStartTime;
   Serial.printf("[PPG] Session lasted %lu s, avg PPG: %.1f, %ld samples\n",
-                duration / 1000, avg, countPPG);  
+                duration / 1000, avg, countPPG);
+
+  // Append summary to /history.txt on SD
+  if (sdAvailable) {
+    File f = SD.open("/history.txt", FILE_APPEND);
+    if (f) {
+      // Match original ppg.text history format expected by app
+      String cleanName = currentFilename;
+      cleanName.replace("/", ""); cleanName.replace(".csv", "");
+      String summary = "ID:" + cleanName + ",Time:" + String(duration / 1000) + "s,Avg:" + String(avg, 1);
+      f.println(xorCipher(summary));
+      f.close();
+      Serial.println("[SD] Summary appended to /history.txt");
+    }
+  }
+  currentFilename = "";
   compressionLevel = 0;
 }
 
 static void processHistoryRequest() {
-  // No SD card on this board — send a summary over BLE instead
   if (!deviceConnected || pHistoryCharacteristic == nullptr) return;
-  
-  Serial.println("[PPG] History requested (no SD — sending status)");
-  String msg = "No SD card — data sent via BLE only";
-  pHistoryCharacteristic->setValue(msg.c_str());
-  pHistoryCharacteristic->notify();
+
+  if (!sdAvailable || !SD.exists("/history.txt")) {
+    Serial.println("[PPG] History requested — no data");
+    String msg = "NO_HISTORY";
+    pHistoryCharacteristic->setValue(msg.c_str());
+    pHistoryCharacteristic->notify();
+    return;
+  }
+
+  Serial.println("[PPG] Sending history over BLE...");
+  File f = SD.open("/history.txt", FILE_READ);
+  if (!f) return;
+
+  while (f.available()) {
+    String encLine = f.readStringUntil('\n');
+    encLine.trim();
+    if (encLine.isEmpty()) continue;
+
+    // Decrypt and send over BLE
+    String decrypted = xorCipher(encLine);
+    pHistoryCharacteristic->setValue(decrypted.c_str());
+    pHistoryCharacteristic->notify();
+    Serial.println("Sent: " + decrypted);
+    delay(50);  // Match original timing to prevent BLE buffer overflow
+  }
+  f.close();
+  Serial.println("[PPG] --- End of History ---");
 }
 
 // ===================== PUBLIC API =====================
 
 void begin() {
-  // Initialize I2C for MAX30105 on dedicated pins (GPIO 15 SDA, GPIO 14 SCL)
+  // Initialize I2C for MAX30105 on dedicated pins
   Wire.begin(PPG_I2C_SDA, PPG_I2C_SCL);
   
   if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
@@ -146,6 +241,16 @@ void begin() {
     // Configure sensor: LED brightness, sample avg, mode, sample rate, pulse width, ADC range
     particleSensor.setup(0x1F, 4, 2, 400, 411, 4096);
     Serial.println("[PPG] MAX30105 initialized");
+  }
+
+  // Initialize SD card (matches original ppg.text init)
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("[SD] Card mount FAILED — logging disabled");
+    sdAvailable = false;
+  } else {
+    sdAvailable = true;
+    Serial.printf("[SD] Card mounted, size: %llu MB\n", SD.cardSize() / (1024 * 1024));
   }
 
   // Initialize BLE
@@ -219,6 +324,12 @@ void update() {
   if (_isSessionActive) {
     sumPPG += currentPPG;
     countPPG++;
+
+    // --- Log to SD card at fixed interval ---
+    if (sdAvailable && (now - lastSdWriteTime >= SD_WRITE_INTERVAL_MS)) {
+      lastSdWriteTime = now;
+      logToSD(currentPPG);
+    }
   }
 }
 
