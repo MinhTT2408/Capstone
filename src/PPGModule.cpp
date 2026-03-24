@@ -53,6 +53,15 @@ static unsigned long lastSdWriteTime = 0;
 static bool sdAvailable = false;
 static String currentFilename;
 
+// ===================== FREERTOS SD TASK =====================
+struct LogItem {
+  char filename[24];
+  unsigned long elapsed;
+  float ppgValue;
+  int level;
+};
+static QueueHandle_t sdLogQueue = nullptr;
+
 // Global stop flag for motor abort
 volatile bool stopMotorRequested = false;
 
@@ -125,17 +134,39 @@ static String getNextFilename() {
   return "/overflow.csv";
 }
 
+static void sdWriteTask(void *parameter) {
+  Serial.printf("[SD] Write Task started! Running on Core: %d\n", xPortGetCoreID());
+
+  LogItem item;
+  while (1) {
+    // Wait indefinitely for a new item in the queue (Uses 0% CPU while waiting)
+    if (xQueueReceive(sdLogQueue, &item, portMAX_DELAY) == pdTRUE) {
+      String line = String(item.elapsed) + "," + String(item.ppgValue) + "," + String(item.level);
+      String encrypted = xorCipher(line);
+
+      File f = SD.open(item.filename, FILE_APPEND);
+      if (f) {
+        f.println(encrypted);
+        f.close();
+      }
+    }
+  }
+}
+
 static void logToSD(float ppgValue) {
-  if (!sdAvailable || currentFilename.isEmpty()) return;
+  if (!sdAvailable || currentFilename.isEmpty() || sdLogQueue == nullptr) return;
 
-  unsigned long elapsed = millis() - sessionStartTime;
-  String line = String(elapsed) + "," + String(ppgValue) + "," + String(compressionLevel);
-  String encrypted = xorCipher(line);
+  LogItem item;
+  strncpy(item.filename, currentFilename.c_str(), sizeof(item.filename) - 1);
+  item.filename[sizeof(item.filename) - 1] = '\0';
+  item.elapsed = millis() - sessionStartTime;
+  item.ppgValue = ppgValue;
+  item.level = compressionLevel;
 
-  File f = SD.open(currentFilename, FILE_APPEND);
-  if (f) {
-    f.println(encrypted);
-    f.close();
+  // Non-blocking send: Timeout is 0. If the SD card stalls and queue fills up, 
+  // we drop the log point to guarantee motor loop doesn't stutter.
+  if (xQueueSend(sdLogQueue, &item, 0) != pdTRUE) {
+    Serial.println("[SD] Warning: Write queue full, dropping log point to save motor loop!");
   }
 }
 
@@ -232,10 +263,24 @@ static void processHistoryRequest() {
 // ===================== PUBLIC API =====================
 
 void begin() {
+  // Initialize SD FreeRTOS Queue and Task
+  sdLogQueue = xQueueCreate(20, sizeof(LogItem));
+  if (sdLogQueue != nullptr) {
+    xTaskCreatePinnedToCore(
+      sdWriteTask,      // Function implementing the task
+      "SD_Write_Task",  // Task name
+      4096,             // Stack size in words
+      NULL,             // Task parameters
+      1,                // Priority
+      NULL,             // Task handle
+      0                 // Pin to Core 0 (Network/IO core). Leaves Core 1 for App/Motor
+    );
+  }
+
   // Initialize I2C for MAX30105 on dedicated pins
   Wire.begin(PPG_I2C_SDA, PPG_I2C_SCL);
   
-  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("[PPG] MAX30105 not found! Check wiring.");
   } else {
     // Configure sensor: LED brightness, sample avg, mode, sample rate, pulse width, ADC range
@@ -303,13 +348,18 @@ void update() {
     doEndSession();
   }
 
-  // --- Read PPG sensor ---
-  long irValue = particleSensor.getIR();
-  if (!dcInitialized) { dc = irValue; dcInitialized = true; }
-  dc = 0.95f * dc + 0.05f * irValue;
-  float ac = irValue - dc;
-  currentPPG = ac * 2.0f + 500.0f;
-  currentPPG = constrain(currentPPG, 0.0f, 1000.0f);
+  // --- Read PPG sensor (NON-BLOCKING) ---
+  particleSensor.check(); // Non-blocking check for new data in FIFO
+  while (particleSensor.available()) {
+    long irValue = particleSensor.getFIFOIR(); // Read instant FIFO data
+    particleSensor.nextSample(); // Advance the tail to clear the read data
+    
+    if (!dcInitialized) { dc = irValue; dcInitialized = true; }
+    dc = 0.95f * dc + 0.05f * irValue;
+    float ac = irValue - dc;
+    currentPPG = ac * 2.0f + 500.0f;
+    currentPPG = constrain(currentPPG, 0.0f, 1000.0f);
+  }
 
   // --- BLE: send PPG at 50 Hz ---
   if (now - lastBleTime >= BLE_PPG_INTERVAL_MS) {
