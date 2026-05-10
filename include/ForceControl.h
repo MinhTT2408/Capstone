@@ -9,8 +9,8 @@
 namespace ForceControl {
 
 // ===================== FORCE CONTROL CONFIGURATION =====================
-// Force sensor configuration
-static const int FORCE_SENSOR_PIN = 4;        // ADC1_CH0 (GPIO 4 = VP, input only)
+// Force sensor configuration (one sensor per motor)
+static constexpr int FORCE_SENSOR_PINS[3] = {4, 5, 6};  // GPIO pins for motors 1, 2, 3
 static const float FORCE_SENSOR_MIN_V = 0.0f;  // Minimum sensor voltage
 static const float FORCE_SENSOR_MAX_V = 3.3f;  // Maximum sensor voltage (ESP32 ADC reference)
 static const float FORCE_MIN = 0.0f;           // Minimum force in Newtons (at min voltage)
@@ -39,16 +39,18 @@ static const float DEFAULT_FORCE_SETPOINT = 17.5f;  // Default desired force in 
 void begin();
 
 /**
- * @brief Read raw force sensor value
+ * @brief Read raw force sensor value for a specific motor
+ * @param motorIndex Motor index (0-2)
  * @return Raw ADC value (0-4095 for 12-bit ADC)
  */
-int readRawSensor();
+int readRawSensor(int motorIndex);
 
 /**
- * @brief Read force sensor and convert to Newtons
+ * @brief Read force sensor and convert to Newtons for a specific motor
+ * @param motorIndex Motor index (0-2)
  * @return Force in Newtons
  */
-float readForce();
+float readForce(int motorIndex);
 
 /**
  * @brief Set the desired force setpoint
@@ -63,23 +65,26 @@ void setForceSetpoint(float force);
 float getForceSetpoint();
 
 /**
- * @brief Update force PID controller and compute desired revolutions
+ * @brief Update force PID controller for a specific motor
  * Should be called at FORCE_PID_SAMPLE_TIME_MS intervals
+ * @param motorIndex Motor index (0-2)
  * @return Desired revolutions for the inner position control loop
  */
-float update();
+float update(int motorIndex);
 
 /**
- * @brief Get the last computed desired revolutions output
+ * @brief Get the last computed desired revolutions for a specific motor
+ * @param motorIndex Motor index (0-2)
  * @return Desired revolutions
  */
-float getDesiredRevolutions();
+float getDesiredRevolutions(int motorIndex);
 
 /**
- * @brief Get the last measured force
+ * @brief Get the last measured force for a specific motor
+ * @param motorIndex Motor index (0-2)
  * @return Last measured force in Newtons
  */
-float getLastMeasuredForce();
+float getLastMeasuredForce(int motorIndex);
 
 /**
  * @brief Reset the force PID controller
@@ -111,35 +116,45 @@ bool isEnabled();
 void printStatus();
 
 /**
- * @brief Start tracking peak force during a sequence
- * Resets the peak force value to begin fresh tracking
+ * @brief Start tracking peak force for all motors
+ * Resets all peak force values to begin fresh tracking
  */
 void startPeakTracking();
 
 /**
- * @brief Update peak force tracking with current measurement
+ * @brief Start tracking peak force for a specific motor
+ * Resets that motor's peak force value only
+ * @param motorIndex Motor index (0-2)
+ */
+void startPeakTracking(int motorIndex);
+
+/**
+ * @brief Update peak force tracking for all motors
  * Should be called periodically during sequence execution
  */
 void updatePeakTracking();
 
 /**
- * @brief Get the peak force measured during current sequence
+ * @brief Get the peak force measured for a specific motor during current sequence
+ * @param motorIndex Motor index (0-2)
  * @return Peak force in Newtons
  */
-float getPeakForce();
+float getPeakForce(int motorIndex);
 
 /**
- * @brief Compute amplitude for next sequence based on peak force
+ * @brief Compute amplitude for next sequence for a specific motor
  * Compares peak force to setpoint and adjusts amplitude
+ * @param motorIndex Motor index (0-2)
  * @return Computed amplitude in revolutions for next sequence
  */
-float computeNextAmplitude();
+float computeNextAmplitude(int motorIndex);
 
 /**
- * @brief Get initial amplitude for the first sequence
+ * @brief Get initial amplitude for the first sequence for a specific motor
+ * @param motorIndex Motor index (0-2)
  * @return Initial amplitude in revolutions
  */
-float getInitialAmplitude();
+float getInitialAmplitude(int motorIndex);
 
 } // namespace ForceControl
 

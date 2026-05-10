@@ -204,31 +204,21 @@ void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions) {
   Serial.flush();
 }
 
-void executePattern1(BTS7960 motors[], float amplitude) {
+void executePattern1(BTS7960 motors[], float amplitudes[]) {
   Serial.println("\n========== PATTERN 1: SEQUENTIAL ==========\n");
   
-  // Motor 1
-  Serial.printf("--- Motor 1: sine cycle (%.1f rev) ---\n", amplitude);
-  EncoderModule::printPositions();
-  runSineCycle(motors[0], 0, amplitude);
-  delay(PAUSE_BETWEEN_MS);
+  for (int i = 0; i < 3; i++) {
+    Serial.printf("--- Motor %d: sine cycle (%.1f rev) ---\n", i + 1, amplitudes[i]);
+    EncoderModule::printPositions();
+    ForceControl::startPeakTracking(i);  // Isolate peak tracking to this motor's run
+    runSineCycle(motors[i], i, amplitudes[i]);
+    delay(PAUSE_BETWEEN_MS);
+  }
 
-  // Motor 2
-  Serial.printf("\n--- Motor 2: sine cycle (%.1f rev) ---\n", amplitude);
-  EncoderModule::printPositions();
-  runSineCycle(motors[1], 1, amplitude);
-  delay(PAUSE_BETWEEN_MS);
-
-  // Motor 3
-  Serial.printf("\n--- Motor 3: sine cycle (%.1f rev) ---\n", amplitude);
-  EncoderModule::printPositions();
-  runSineCycle(motors[2], 2, amplitude);
-  delay(PAUSE_BETWEEN_MS);
-  
   Serial.println("\n========== Pattern 1 Complete ==========\n");
 }
 
-void executePattern2(BTS7960 motors[], float amplitude) {
+void executePattern2(BTS7960 motors[], float amplitudes[]) {
   Serial.println("\n========== PATTERN 2: PHASE OFFSET ==========\n");
   Serial.printf("Motor 1 & 3: Start at t=0, duration=%d ms\n", SINE_DURATION_MS);
   Serial.printf("Motor 2: Start at t=%d ms (when M1&M3 at 50%%), duration=%d ms\n", SINE_DURATION_MS/2, SINE_DURATION_MS);
@@ -247,7 +237,12 @@ void executePattern2(BTS7960 motors[], float amplitude) {
   const uint32_t totalDuration = SINE_DURATION_MS + SINE_DURATION_MS / 2;
   const float TWO_PI_F = 2.0f * (float)M_PI;
   const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
-  const float amplitudeCounts = amplitude * COUNTS_PER_REV;
+  // Per-motor amplitude counts
+  const float amplitudeCounts[3] = {
+    amplitudes[0] * COUNTS_PER_REV,
+    amplitudes[1] * COUNTS_PER_REV,
+    amplitudes[2] * COUNTS_PER_REV
+  };
   
   unsigned long lastPidTime = globalStartTime;
   unsigned long lastLogTime = globalStartTime;
@@ -297,7 +292,7 @@ void executePattern2(BTS7960 motors[], float amplitude) {
         float progress = elapsed / (SINE_DURATION_MS / 1000.0f);
         float theta = TWO_PI_F * progress;
         float sineValue = sinf(theta * 0.5f);
-        float targetPos = -sineValue * amplitudeCounts; // Negative for reverse direction
+        float targetPos = -sineValue * amplitudeCounts[0];
         long currentPos = EncoderModule::getPosition(0);
         pidMotor[0].setSetpoint(targetPos);
         float pidOut = pidMotor[0].compute((float)currentPos, pidSampleTimeS);
@@ -314,7 +309,7 @@ void executePattern2(BTS7960 motors[], float amplitude) {
         float progress = elapsed / (SINE_DURATION_MS / 1000.0f);
         float theta = TWO_PI_F * progress;
         float sineValue = sinf(theta * 0.5f);
-        float targetPos = -sineValue * amplitudeCounts; // Negative for reverse direction
+        float targetPos = -sineValue * amplitudeCounts[1];
         long currentPos = EncoderModule::getPosition(1);
         pidMotor[1].setSetpoint(targetPos);
         float pidOut = pidMotor[1].compute((float)currentPos, pidSampleTimeS);
@@ -331,7 +326,7 @@ void executePattern2(BTS7960 motors[], float amplitude) {
         float progress = elapsed / (SINE_DURATION_MS / 1000.0f);
         float theta = TWO_PI_F * progress;
         float sineValue = sinf(theta * 0.5f);
-        float targetPos = -sineValue * amplitudeCounts; // Negative for reverse direction
+        float targetPos = -sineValue * amplitudeCounts[2];
         long currentPos = EncoderModule::getPosition(2);
         pidMotor[2].setSetpoint(targetPos);
         float pidOut = pidMotor[2].compute((float)currentPos, pidSampleTimeS);
@@ -370,7 +365,7 @@ void executePattern2(BTS7960 motors[], float amplitude) {
   Serial.println("\n========== Pattern 2 Complete ==========\n");
 }
 
-void executePattern3(BTS7960 motors[], float amplitude) {
+void executePattern3(BTS7960 motors[], float amplitudes[]) {
   Serial.println("\n========== PATTERN 3: CASCADING HALF-CYCLE ==========\n");
   Serial.println("Visualization:");
   Serial.println("Timeline (each step = half sine cycle duration):");
@@ -388,7 +383,12 @@ void executePattern3(BTS7960 motors[], float amplitude) {
   const uint32_t halfCycleDuration = SINE_DURATION_MS / 2;
   const float TWO_PI_F = 2.0f * (float)M_PI;
   const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
-  const float amplitudeCounts = amplitude * COUNTS_PER_REV;
+  // Per-motor amplitude counts
+  const float amplitudeCounts[3] = {
+    amplitudes[0] * COUNTS_PER_REV,
+    amplitudes[1] * COUNTS_PER_REV,
+    amplitudes[2] * COUNTS_PER_REV
+  };
   
   // Reset all encoders and PIDs
   for (int i = 0; i < 3; i++) {
@@ -448,7 +448,7 @@ void executePattern3(BTS7960 motors[], float amplitude) {
           
         case 2: // t=2: M1 holds at half, M2 starts (0→half)
           motorStates[0] = HOLD_AT_HALF;
-          motorTargets[0] = -amplitudeCounts; // Hold at negative peak
+          motorTargets[0] = -amplitudeCounts[0]; // Hold at negative peak
           motorStates[1] = MOVING_FIRST_HALF;
           motorPhaseStartTime[1] = now;
           motorStates[2] = IDLE;
@@ -459,7 +459,7 @@ void executePattern3(BTS7960 motors[], float amplitude) {
           motorStates[0] = MOVING_SECOND_HALF; // Continue from peak down to 0
           motorPhaseStartTime[0] = now;
           motorStates[1] = HOLD_AT_HALF;
-          motorTargets[1] = -amplitudeCounts; // Hold at negative peak
+          motorTargets[1] = -amplitudeCounts[1]; // Hold at negative peak
           motorStates[2] = MOVING_FIRST_HALF;
           motorPhaseStartTime[2] = now;
           Serial.println("M1: Half→Full (Peak→0) | M2: Hold at Half | M3: 0→Half");
@@ -471,7 +471,7 @@ void executePattern3(BTS7960 motors[], float amplitude) {
           motorStates[1] = MOVING_SECOND_HALF; // Continue from peak down to 0
           motorPhaseStartTime[1] = now;
           motorStates[2] = HOLD_AT_HALF;
-          motorTargets[2] = -amplitudeCounts; // Hold at negative peak
+          motorTargets[2] = -amplitudeCounts[2]; // Hold at negative peak
           Serial.println("M1: Hold at Full (0) | M2: Half→Full (Peak→0) | M3: Hold at Half");
           break;
           
@@ -506,7 +506,7 @@ void executePattern3(BTS7960 motors[], float amplitude) {
       
       for (int i = 0; i < 3; i++) {
         updateMotorState(motors[i], i, motorStates[i], motorPhaseStartTime[i], 
-                        halfCycleDuration, amplitudeCounts, motorTargets[i]);
+                        halfCycleDuration, amplitudeCounts[i], motorTargets[i]);
       }
       
       // Logging
@@ -537,7 +537,7 @@ void executePattern3(BTS7960 motors[], float amplitude) {
   Serial.println("\n========== Pattern 3 Complete ==========\n");
 }
 
-void executePattern4(BTS7960 motors[], float amplitude) {
+void executePattern4(BTS7960 motors[], float amplitudes[]) {
   Serial.println("\n========== PATTERN 4: SEQUENTIAL-THEN-PARALLEL ==========\n");
   Serial.println("Sequence:");
   Serial.println("  Phase 1: M1 moves 0→Peak and holds");
@@ -547,7 +547,12 @@ void executePattern4(BTS7960 motors[], float amplitude) {
   
   const uint32_t halfCycleDuration = SINE_DURATION_MS / 2;
   const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
-  const float amplitudeCounts = amplitude * COUNTS_PER_REV;
+  // Per-motor amplitude counts
+  const float amplitudeCounts[3] = {
+    amplitudes[0] * COUNTS_PER_REV,
+    amplitudes[1] * COUNTS_PER_REV,
+    amplitudes[2] * COUNTS_PER_REV
+  };
   
   // Reset all encoders and PIDs
   for (int i = 0; i < 3; i++) {
@@ -610,7 +615,7 @@ void executePattern4(BTS7960 motors[], float amplitude) {
         phaseComplete = true;
         int justFinishedMotor = currentPhase - 1; // 0, 1, or 2
         motorStates[justFinishedMotor] = HOLD_AT_HALF;
-        motorTargets[justFinishedMotor] = -amplitudeCounts; // Hold at negative peak
+        motorTargets[justFinishedMotor] = -amplitudeCounts[justFinishedMotor]; // Hold at negative peak
         
         if (currentPhase == 3) {
           // All motors have reached peak, start simultaneous descent
@@ -646,7 +651,7 @@ void executePattern4(BTS7960 motors[], float amplitude) {
       
       for (int i = 0; i < 3; i++) {
         updateMotorState(motors[i], i, motorStates[i], motorPhaseStartTime[i], 
-                        halfCycleDuration, amplitudeCounts, motorTargets[i]);
+                        halfCycleDuration, amplitudeCounts[i], motorTargets[i]);
       }
       
       // Logging

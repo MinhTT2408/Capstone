@@ -36,16 +36,16 @@ namespace MotionControl {
   void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions = 2.0f);                               
   
   // Execute motion pattern 1: Sequential (one motor at a time)
-  void executePattern1(BTS7960 motors[], float amplitude);
+  void executePattern1(BTS7960 motors[], float amplitudes[]);
   
   // Execute motion pattern 2: Simultaneous with phase offset                                                                                                                        
-  void executePattern2(BTS7960 motors[], float amplitude);
+  void executePattern2(BTS7960 motors[], float amplitudes[]);
   
   // Execute motion pattern 3: Cascading half-cycle sequential
-  void executePattern3(BTS7960 motors[], float amplitude);
+  void executePattern3(BTS7960 motors[], float amplitudes[]);
   
   // Execute motion pattern 4: Sequential first-half then parallel second-half
-  void executePattern4(BTS7960 motors[], float amplitude);
+  void executePattern4(BTS7960 motors[], float amplitudes[]);
 }
 
 #endif // MOTION_CONTROL_H
