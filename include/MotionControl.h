@@ -20,7 +20,8 @@ namespace MotionControl {
     PATTERN_SEQUENTIAL = 1,                 // Motors run one after another
     PATTERN_PHASE_OFFSET = 2,               // Motors 1&3 simultaneous, Motor 2 with delayed start
     PATTERN_CASCADING = 3,                  // Cascading half-cycle movements with hold states
-    PATTERN_SEQUENTIAL_THEN_PARALLEL = 4    // Sequential first-half, simultaneous second-half
+    PATTERN_SEQUENTIAL_THEN_PARALLEL = 4,   // Sequential first-half, simultaneous second-half
+    PATTERN_SIMULTANEOUS = 5                  // All motors move together in phase (full sine cycle)
   };
   
   // Initialize motion control system (PID controllers)
@@ -46,6 +47,9 @@ namespace MotionControl {
   
   // Execute motion pattern 4: Sequential first-half then parallel second-half
   void executePattern4(BTS7960 motors[], float amplitudes[]);
+
+  // Execute motion pattern 5: All motors simultaneous full sine cycle in phase
+  void executePattern5(BTS7960 motors[], float amplitudes[]);
 }
 
 #endif // MOTION_CONTROL_H

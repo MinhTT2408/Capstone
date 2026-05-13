@@ -62,6 +62,15 @@ struct LogItem {
 };
 static QueueHandle_t sdLogQueue = nullptr;
 
+// Force sensor log — plaintext CSV, persistent file handle per session
+struct ForceLogItem {
+  uint32_t elapsedMs;
+  float force[3];
+};
+static QueueHandle_t forceLogQueue = nullptr;
+static File forceFile;
+static volatile bool closeForceFileRequested = false;
+
 // Global stop flag for motor abort
 volatile bool stopMotorRequested = false;
 
@@ -139,8 +148,9 @@ static void sdWriteTask(void *parameter) {
 
   LogItem item;
   while (1) {
-    // Wait indefinitely for a new item in the queue (Uses 0% CPU while waiting)
-    if (xQueueReceive(sdLogQueue, &item, portMAX_DELAY) == pdTRUE) {
+    // Wait up to 25ms for a PPG item — short timeout keeps force queue and close
+    // request serviced even when no PPG data is pending.
+    if (xQueueReceive(sdLogQueue, &item, pdMS_TO_TICKS(25)) == pdTRUE) {
       String line = String(item.elapsed) + "," + String(item.ppgValue) + "," + String(item.level);
       String encrypted = xorCipher(line);
 
@@ -149,6 +159,30 @@ static void sdWriteTask(void *parameter) {
         f.println(encrypted);
         f.close();
       }
+    }
+
+    // Drain force sensor queue — write plaintext rows to the persistent open handle
+    if (forceLogQueue != nullptr) {
+      ForceLogItem fitem;
+      while (xQueueReceive(forceLogQueue, &fitem, 0) == pdTRUE) {
+        if (forceFile) {
+          char row[64];
+          snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f\n",
+                   (unsigned long)fitem.elapsedMs,
+                   fitem.force[0], fitem.force[1], fitem.force[2]);
+          forceFile.print(row);
+        }
+      }
+    }
+
+    // Close force file once session has ended (flush first to prevent data loss)
+    if (closeForceFileRequested) {
+      if (forceFile) {
+        forceFile.flush();
+        forceFile.close();
+        Serial.println("[SD] Force log file closed");
+      }
+      closeForceFileRequested = false;
     }
   }
 }
@@ -194,6 +228,25 @@ static void startNewSession() {
     } else {
       Serial.println("[SD] Failed to create session file!");
     }
+
+    // Build force sensor filename by reusing the same 4-digit number
+    // e.g. /0003.csv  ->  /force_sensor_0003.csv
+    String numStr = currentFilename;
+    numStr.replace("/", "");
+    numStr.replace(".csv", "");
+    char forceName[32];
+    snprintf(forceName, sizeof(forceName), "/force_sensor_%s.csv", numStr.c_str());
+
+    // Remove stale file if it exists, then open fresh with header
+    if (SD.exists(forceName)) SD.remove(forceName);
+    forceFile = SD.open(forceName, FILE_WRITE);
+    if (forceFile) {
+      forceFile.println("TimeMs,Force1_N,Force2_N,Force3_N");
+      // Keep forceFile open — sdWriteTask writes to it directly until session ends
+      Serial.printf("[SD] Force log file: %s\n", forceName);
+    } else {
+      Serial.println("[SD] Failed to create force log file!");
+    }
   }
   lastSdWriteTime = millis();
 }
@@ -225,6 +278,8 @@ static void doEndSession() {
       Serial.println("[SD] Summary appended to /history.txt");
     }
   }
+  // Signal sdWriteTask to drain the force queue then flush + close the file
+  closeForceFileRequested = true;
   currentFilename = "";
   compressionLevel = 0;
 }
@@ -263,8 +318,9 @@ static void processHistoryRequest() {
 // ===================== PUBLIC API =====================
 
 void begin() {
-  // Initialize SD FreeRTOS Queue and Task
-  sdLogQueue = xQueueCreate(20, sizeof(LogItem));
+  // Initialize SD FreeRTOS Queues and Task
+  sdLogQueue    = xQueueCreate(20,  sizeof(LogItem));
+  forceLogQueue = xQueueCreate(100, sizeof(ForceLogItem));  // 100 items = ~2s buffer at 50Hz
   if (sdLogQueue != nullptr) {
     xTaskCreatePinnedToCore(
       sdWriteTask,      // Function implementing the task
@@ -408,6 +464,21 @@ int getCompressionLevel() {
 
 bool isBleConnected() {
   return deviceConnected;
+}
+
+void logForceData(uint32_t elapsedMs, float f1, float f2, float f3) {
+  if (!sdAvailable || forceLogQueue == nullptr) return;
+  ForceLogItem item;
+  item.elapsedMs = elapsedMs;
+  item.force[0]  = f1;
+  item.force[1]  = f2;
+  item.force[2]  = f3;
+  // Non-blocking: drops silently if queue is full (mirrors PPG log behavior)
+  xQueueSend(forceLogQueue, &item, 0);
+}
+
+unsigned long getSessionStartTime() {
+  return sessionStartTime;
 }
 
 } // namespace PPGModule

@@ -88,6 +88,9 @@ static const int SD_MISO = 13;
 // SD Card logging rate during active session
 static const unsigned long SD_WRITE_INTERVAL_MS = 500;  // 2 Hz
 
+// Force sensor CSV logging rate
+static const uint32_t FORCE_LOG_INTERVAL_MS = 20;  // 50 Hz — matches force PID sample rate
+
 // XOR encryption key for SD card data
 static const char ENCRYPTION_KEY = 0x5A;
 
@@ -97,8 +100,9 @@ static const char ENCRYPTION_KEY = 0x5A;
 #define LEVEL_CHAR_UUID         "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 #define HISTORY_CHAR_UUID       "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
 
-// BLE PPG send rate
-static const unsigned long BLE_PPG_INTERVAL_MS = 20;  // 50Hz
+// BLE PPG send rate — keep at or above the phone's BLE connection interval (~40-100ms)
+// 50ms (20Hz) is reliable; 20ms (50Hz) overflows the BLE TX buffer and causes notify errors
+static const unsigned long BLE_PPG_INTERVAL_MS = 50;  // 20Hz
 
 // Compression level → force setpoint mapping (Newtons)
 // Level 1 = light, 2 = medium-light, 3 = medium, 4 = firm

@@ -70,7 +70,7 @@ float readForce(int motorIndex) {
   float voltage = (rawValue / ADC_MAX) * ADC_REF_VOLTAGE;
   
   // Map voltage to force (linear mapping)
-  float force = voltage * 10; 
+  float force = voltage * 11.25; 
   // Clamp to valid range
   force = constrain(force, FORCE_MIN, FORCE_MAX);
 

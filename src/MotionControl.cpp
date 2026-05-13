@@ -682,4 +682,104 @@ void executePattern4(BTS7960 motors[], float amplitudes[]) {
   Serial.println("\n========== Pattern 4 Complete ==========\n");
 }
 
+void executePattern5(BTS7960 motors[], float amplitudes[]) {
+  Serial.println("\n========== PATTERN 5: SIMULTANEOUS SINE CYCLE ==========\n");
+  Serial.println("All three motors run a full sine cycle in phase simultaneously.");
+  Serial.printf("Duration: %d ms\n\n", SINE_DURATION_MS);
+
+  const uint32_t totalDurationMs = SINE_DURATION_MS;
+  const float TWO_PI_F = 2.0f * (float)M_PI;
+  const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
+  const float amplitudeCounts[3] = {
+    amplitudes[0] * COUNTS_PER_REV,
+    amplitudes[1] * COUNTS_PER_REV,
+    amplitudes[2] * COUNTS_PER_REV
+  };
+
+  // Reset all encoders and PIDs
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    EncoderModule::resetPosition(i);
+    pidMotor[i].reset();
+  }
+
+  EncoderModule::printPositions();
+
+  unsigned long startTime = millis();
+  unsigned long lastPidTime = startTime;
+  unsigned long lastLogTime = startTime;
+  int loopCount = 0;
+
+  Serial.println("=== Starting Pattern 5 ===\n");
+
+  while (millis() - startTime < totalDurationMs) {
+    unsigned long now = millis();
+
+    // Check BLE stop request
+    if (PPGModule::stopMotorRequested) {
+      Serial.println("[Pattern 5] BLE stop requested -> aborting");
+      for (int j = 0; j < NUM_MOTORS; j++) motors[j].coast();
+      return;
+    }
+
+    // Check limit sensors for all motors
+    for (int i = 0; i < NUM_MOTORS; i++) {
+      if (LimitSensors::isTriggered(i)) {
+        Serial.printf("** Sensor triggered for motor %d -> stopping all\n", i + 1);
+        for (int j = 0; j < NUM_MOTORS; j++) motors[j].coast();
+        LimitSensors::clearFlags(i);
+        return;
+      }
+    }
+
+    // PID runs at fixed rate for all motors
+    if (now - lastPidTime >= PID_SAMPLE_TIME_MS) {
+      loopCount++;
+
+      ForceControl::updatePeakTracking();
+
+      float elapsed = (now - startTime) / 1000.0f;
+      float progress = elapsed / (totalDurationMs / 1000.0f); // 0..1
+      float theta = TWO_PI_F * progress;
+      float sineValue = sinf(theta * 0.5f); // 0..+1
+      // Negative for counterclockwise-first (matches other patterns)
+      float targetFraction = -sineValue;
+
+      for (int i = 0; i < NUM_MOTORS; i++) {
+        float targetPos = targetFraction * amplitudeCounts[i];
+        long currentPos = EncoderModule::getPosition(i);
+        pidMotor[i].setSetpoint(targetPos);
+        float pidOut = pidMotor[i].compute((float)currentPos, pidSampleTimeS);
+        Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
+        int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
+        motors[i].set(duty, dir);
+      }
+
+      // Logging
+      if (loopCount <= 5 || (now - lastLogTime > 500)) {
+        long pos1 = EncoderModule::getPosition(0);
+        long pos2 = EncoderModule::getPosition(1);
+        long pos3 = EncoderModule::getPosition(2);
+        Serial.printf("[%.1fs] M1:%6ld | M2:%6ld | M3:%6ld counts\n",
+                      elapsed, pos1, pos2, pos3);
+        Serial.flush();
+        lastLogTime = now;
+      }
+
+      lastPidTime = now;
+    }
+
+    PPGModule::update();
+    delay(1);
+  }
+
+  // Stop all motors
+  for (int i = 0; i < NUM_MOTORS; i++) motors[i].coast();
+
+  Serial.println("\n=== Final Positions ===");
+  EncoderModule::printPositions();
+  Serial.printf("Total PID loops: %d (expected: %d)\n",
+                loopCount, (int)(totalDurationMs / PID_SAMPLE_TIME_MS));
+  Serial.println("\n========== Pattern 5 Complete ==========\n");
+}
+
 } // namespace MotionControl

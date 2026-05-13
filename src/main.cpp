@@ -26,12 +26,31 @@ BTS7960 motor[3] = {
 // 2 = Phase offset (M1 & M3 simultaneous, M2 delayed start)
 // 3 = Cascading half-cycle (sequential with hold states)
 // 4 = Sequential-then-parallel (sequential ascent, simultaneous descent)
-MotionControl::MotionPattern currentPattern = MotionControl::PATTERN_SEQUENTIAL;
+// 5 = Simultaneous (all motors in phase, full sine cycle together)
+MotionControl::MotionPattern currentPattern = MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL;
 
 // ===================== FORCE CONTROL MODE =====================
 // Set to true to enable outer force PID loop (amplitude controlled by force sensor)
 // Set to false to use default amplitude (DEFAULT_AMPLITUDE_REV in config.h)
 bool useForceControl = true;
+
+// ===================== FORCE SENSOR LOG TASK =====================
+// Runs on Core 1 at 50Hz (FORCE_LOG_INTERVAL_MS = 20ms).
+// Reads all three force sensors and queues rows for sdWriteTask (Core 0) to write.
+static void forceLogTask(void *param) {
+  TickType_t lastWake = xTaskGetTickCount();
+  while (true) {
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(FORCE_LOG_INTERVAL_MS));
+    if (!PPGModule::isSessionActive()) continue;
+    uint32_t elapsed = (uint32_t)(millis() - PPGModule::getSessionStartTime());
+    PPGModule::logForceData(
+      elapsed,
+      ForceControl::readForce(0),
+      ForceControl::readForce(1),
+      ForceControl::readForce(2)
+    );
+  }
+}
 
 // ===================== SETUP =====================
 void setup() {
@@ -69,6 +88,17 @@ void setup() {
   // Initialize PPG sensor + BLE
   PPGModule::begin();
   Serial.println("✓ PPG + BLE initialized\n");
+
+  // Spawn force sensor logging task (Core 1, same core as ADC reads)
+  xTaskCreatePinnedToCore(
+    forceLogTask,      // Task function
+    "ForceLog_Task",   // Task name
+    2048,              // Stack size in words
+    NULL,              // Parameters
+    1,                 // Priority (same as sdWriteTask)
+    NULL,              // Task handle
+    1                  // Core 1 — ADC reads stay on the app core
+  );
 
   // Print control mode
   if (useForceControl) {
@@ -146,6 +176,9 @@ void loop() {
         case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
           MotionControl::executePattern4(motor, amplitudes);
           break;
+        case MotionControl::PATTERN_SIMULTANEOUS:
+          MotionControl::executePattern5(motor, amplitudes);
+          break;
         default:
           Serial.println("ERROR: Invalid pattern!");
           delay(1000);
@@ -204,6 +237,9 @@ void loop() {
       break;
     case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
       MotionControl::executePattern4(motor, amplitudes);
+      break;
+    case MotionControl::PATTERN_SIMULTANEOUS:
+      MotionControl::executePattern5(motor, amplitudes);
       break;
     default:
       Serial.println("ERROR: Invalid pattern selected!");

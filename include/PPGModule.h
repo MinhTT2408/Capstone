@@ -76,6 +76,24 @@ namespace PPGModule {
    * Checked by MotionControl inner loops for mid-cycle abort
    */
   extern volatile bool stopMotorRequested;
+
+  // ===================== FORCE SENSOR LOGGING =====================
+
+  /**
+   * @brief Queue a force sensor reading row for SD card write.
+   * Non-blocking — drops silently if queue is full.
+   * @param elapsedMs Milliseconds since session start
+   * @param f1 Force sensor 1 reading in Newtons
+   * @param f2 Force sensor 2 reading in Newtons
+   * @param f3 Force sensor 3 reading in Newtons
+   */
+  void logForceData(uint32_t elapsedMs, float f1, float f2, float f3);
+
+  /**
+   * @brief Return the millis() timestamp when the current session started.
+   * Used by forceLogTask in main.cpp to compute elapsed time.
+   */
+  unsigned long getSessionStartTime();
 }
 
 #endif // PPG_MODULE_H
