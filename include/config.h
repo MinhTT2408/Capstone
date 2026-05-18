@@ -99,6 +99,7 @@ static const char ENCRYPTION_KEY = 0x5A;
 #define PPG_CHAR_UUID           "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define LEVEL_CHAR_UUID         "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 #define HISTORY_CHAR_UUID       "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
+#define FORCE_CHAR_UUID         "6e400005-b5a3-f393-e0a9-e50e24dcca9e"
 
 // BLE PPG send rate — keep at or above the phone's BLE connection interval (~40-100ms)
 // 50ms (20Hz) is reliable; 20ms (50Hz) overflows the BLE TX buffer and causes notify errors

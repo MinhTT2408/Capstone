@@ -10,6 +10,7 @@
 #include "FS.h"
 #include "SD.h"
 #include "SPI.h"
+#include "ForceControl.h" // Added for reading force sensors
 
 namespace PPGModule {
 
@@ -25,10 +26,12 @@ static bool dcInitialized = false;
 static BLECharacteristic *pPPGCharacteristic = nullptr;
 static BLECharacteristic *pLevelCharacteristic = nullptr;
 static BLECharacteristic *pHistoryCharacteristic = nullptr;
+static BLECharacteristic *pForceCharacteristic = nullptr; // Added for Force Chart
 static bool deviceConnected = false;
 
 // Compression level from app (1-4 active, 0 = stop)
 static volatile int compressionLevel = 0;
+static volatile int compressionType = 0; // Track compression mode (1-4)
 
 // RTOS-safe flags (set from BLE callbacks, processed in update())
 static volatile bool fetchHistoryRequested = false;
@@ -48,6 +51,8 @@ static unsigned long sessionStartTime = 0;
 // Timing
 static unsigned long lastBleTime = 0;
 static unsigned long lastSdWriteTime = 0;
+static unsigned long lastForceBleTime = 0;           // Added for Force Chart
+const unsigned long FORCE_BLE_INTERVAL = 50;         // Added for Force Chart (20Hz)
 
 // SD Card
 static bool sdAvailable = false;
@@ -98,25 +103,35 @@ class ServerCallbacks : public BLEServerCallbacks {
 class LevelCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     std::string value = pCharacteristic->getValue();
-    if (!value.empty()) {
-      int newLevel = value[0];
-      Serial.printf("[PPG] Received level: %d\n", newLevel);
+    if (value.empty()) return;
 
-      if (newLevel == 99) {
-        // Special command: fetch history
-        fetchHistoryRequested = true;
-      } 
-      else if (newLevel == 0) {
-        // Stop session
-        endSessionRequested = true;
-        compressionLevel = 0;
-      } 
-      else if (newLevel >= 1 && newLevel <= NUM_LEVELS) {
-        // Start or update session
+    // --- NEW APP FORMAT: 2 Bytes [Type, Level] ---
+    if (value.length() >= 2) {
+      compressionType = value[0]; // Properly saves the Mode Type
+      int newLevel = value[1];     
+      
+      Serial.printf("[PPG] Received Type: %d | Level: %d\n", compressionType, newLevel);
+
+      if (newLevel >= 1 && newLevel <= NUM_LEVELS) {
         if (!_isSessionActive) {
           startSessionRequested = true;
         }
         compressionLevel = newLevel;
+      }
+    } 
+    // --- OLD FORMAT: 1 Byte [99] or [0] ---
+    else if (value.length() == 1) {
+      int command = value[0];
+      Serial.printf("[PPG] Received Command: %d\n", command);
+
+      if (command == 99) {
+        // Special command: fetch history
+        fetchHistoryRequested = true;
+      } 
+      else if (command == 0) {
+        // Stop session
+        endSessionRequested = true;
+        compressionLevel = 0;
       }
     }
   }
@@ -376,6 +391,13 @@ void begin() {
     HISTORY_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
   pHistoryCharacteristic->addDescriptor(new BLE2902());
 
+  // --- Force Sensors Notify characteristic ---
+  pForceCharacteristic = pService->createCharacteristic(
+    FORCE_CHAR_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pForceCharacteristic->addDescriptor(new BLE2902());
+
   pService->start();
   BLEDevice::getAdvertising()->addServiceUUID(PPG_SERVICE_UUID);
   BLEDevice::getAdvertising()->start();
@@ -426,6 +448,21 @@ void update() {
     }
   }
 
+  // --- BLE: send Force Sensors at 20 Hz ---
+  if (deviceConnected && _isSessionActive) {
+    if (now - lastForceBleTime >= FORCE_BLE_INTERVAL) {
+      lastForceBleTime = now;
+      
+      float forces[3];
+      forces[0] = ForceControl::readForce(0);
+      forces[1] = ForceControl::readForce(1);
+      forces[2] = ForceControl::readForce(2);
+      
+      pForceCharacteristic->setValue((uint8_t*)forces, sizeof(forces));
+      pForceCharacteristic->notify();
+    }
+  }
+
   // --- Accumulate session analytics ---
   if (_isSessionActive) {
     sumPPG += currentPPG;
@@ -460,6 +497,10 @@ void endSession() {
 
 int getCompressionLevel() {
   return compressionLevel;
+}
+
+int getCompressionType() {
+  return compressionType;
 }
 
 bool isBleConnected() {

@@ -113,6 +113,10 @@ void setup() {
   delay(500);
 }
 
+// ===================== STATE FLAG =====================
+// Flag to track if the app has ever taken control. 
+bool appHasTakenOver = false;
+
 // ===================== MAIN LOOP =====================
 void loop() {
   // Sequence counter for force control (first sequence uses initial amplitude)
@@ -125,7 +129,10 @@ void loop() {
   // When BLE session is active, level 1-4 sets the force setpoint.
   // ForceControl PID computes amplitude (revolutions) from force error.
   if (PPGModule::isSessionActive()) {
+    appHasTakenOver = true; // The app is now permanently in control!
+    
     int level = PPGModule::getCompressionLevel();
+    int type = PPGModule::getCompressionType(); // Read the Mode
     
     // Track level changes and update force setpoint accordingly
     static int lastBleLevel = 0;
@@ -158,6 +165,15 @@ void loop() {
 
       // Start peak force tracking for all motors (Pattern 1 will reset per-motor internally)
       ForceControl::startPeakTracking();
+
+      // --- MAP APP MODES TO ESP32 PATTERNS ---
+      switch (type) {
+        case 1: currentPattern = MotionControl::PATTERN_SEQUENTIAL; break;
+        case 2: currentPattern = MotionControl::PATTERN_SIMULTANEOUS; break;
+        case 3: currentPattern = MotionControl::PATTERN_CASCADING; break;
+        case 4: currentPattern = MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL; break;
+        default: currentPattern = MotionControl::PATTERN_SEQUENTIAL; break;
+      }
 
       Serial.printf("[BLE Session] Level %d | Force SP: %.1f N | Amplitudes: M1=%.2f M2=%.2f M3=%.2f rev\n",
                     level, ForceControl::getForceSetpoint(), amplitudes[0], amplitudes[1], amplitudes[2]);
@@ -206,58 +222,68 @@ void loop() {
   }
   
   // ---- STANDALONE MODE (no BLE session) ----
-  // Original behavior: force control or manual button control
-  
-  // Determine per-motor amplitudes based on control mode
-  float amplitudes[3];
+  if (!appHasTakenOver) {
+    // Original behavior: force control or manual button control
+    
+    // Determine per-motor amplitudes based on control mode
+    float amplitudes[3];
 
-  if (useForceControl && ForceControl::isEnabled()) {
-    if (sequenceCount == 0) {
-      for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getInitialAmplitude(i);
-      Serial.printf("[Force Control] First sequence - Initial amplitudes: M1=%.2f M2=%.2f M3=%.2f rev\n",
-                    amplitudes[0], amplitudes[1], amplitudes[2]);
+    if (useForceControl && ForceControl::isEnabled()) {
+      if (sequenceCount == 0) {
+        for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getInitialAmplitude(i);
+        Serial.printf("[Force Control] First sequence - Initial amplitudes: M1=%.2f M2=%.2f M3=%.2f rev\n",
+                      amplitudes[0], amplitudes[1], amplitudes[2]);
+      } else {
+        for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getDesiredRevolutions(i);
+      }
+      ForceControl::startPeakTracking();
     } else {
-      for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getDesiredRevolutions(i);
+      for (int i = 0; i < 3; i++) amplitudes[i] = DEFAULT_AMPLITUDE_REV;
     }
-    ForceControl::startPeakTracking();
+
+    // Execute selected motion pattern
+    switch (currentPattern) {
+      case MotionControl::PATTERN_SEQUENTIAL:
+        MotionControl::executePattern1(motor, amplitudes);
+        break;
+      case MotionControl::PATTERN_PHASE_OFFSET:
+        MotionControl::executePattern2(motor, amplitudes);
+        break;
+      case MotionControl::PATTERN_CASCADING:
+        MotionControl::executePattern3(motor, amplitudes);
+        break;
+      case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
+        MotionControl::executePattern4(motor, amplitudes);
+        break;
+      case MotionControl::PATTERN_SIMULTANEOUS:
+        MotionControl::executePattern5(motor, amplitudes);
+        break;
+      default:
+        Serial.println("ERROR: Invalid pattern selected!");
+        delay(1000);
+        break;
+    }
+
+    // After pattern completes, compute next amplitude per motor from each sensor's peak
+    if (useForceControl && ForceControl::isEnabled()) {
+      for (int i = 0; i < 3; i++) {
+        ForceControl::computeNextAmplitude(i);
+      }
+      sequenceCount++;
+    }
+    
+    // Safety check
+    LimitSensors::checkPendingTriggers();
+    
+    Serial.println("\n========== Cycle complete, repeating... ==========\n");
+    delay(1000);
+    
   } else {
-    for (int i = 0; i < 3; i++) amplitudes[i] = DEFAULT_AMPLITUDE_REV;
+    // IDLE: The app took over previously, but the user clicked "End Run". 
+    // Do not run the default pattern. Coast the motors.
+    motor[0].coast();
+    motor[1].coast();
+    motor[2].coast();
+    delay(50);
   }
-
-  // Execute selected motion pattern
-  switch (currentPattern) {
-    case MotionControl::PATTERN_SEQUENTIAL:
-      MotionControl::executePattern1(motor, amplitudes);
-      break;
-    case MotionControl::PATTERN_PHASE_OFFSET:
-      MotionControl::executePattern2(motor, amplitudes);
-      break;
-    case MotionControl::PATTERN_CASCADING:
-      MotionControl::executePattern3(motor, amplitudes);
-      break;
-    case MotionControl::PATTERN_SEQUENTIAL_THEN_PARALLEL:
-      MotionControl::executePattern4(motor, amplitudes);
-      break;
-    case MotionControl::PATTERN_SIMULTANEOUS:
-      MotionControl::executePattern5(motor, amplitudes);
-      break;
-    default:
-      Serial.println("ERROR: Invalid pattern selected!");
-      delay(1000);
-      break;
-  }
-
-  // After pattern completes, compute next amplitude per motor from each sensor's peak
-  if (useForceControl && ForceControl::isEnabled()) {
-    for (int i = 0; i < 3; i++) {
-      ForceControl::computeNextAmplitude(i);
-    }
-    sequenceCount++;
-  }
-  
-  // Safety check
-  LimitSensors::checkPendingTriggers();
-  
-  Serial.println("\n========== Cycle complete, repeating... ==========\n");
-  delay(1000);
 }

@@ -47,12 +47,17 @@ namespace PPGModule {
    */
   void endSession();
 
-  // ===================== COMPRESSION LEVEL =====================
+  // ===================== COMPRESSION LEVEL / TYPE =====================
   
   /**
    * @brief Get the current compression level received from BLE (1-4, or 0 if stopped)
    */
   int getCompressionLevel();
+
+  /**
+   * @brief Get the current compression type/mode received from BLE (1-4)
+   */
+  int getCompressionType();
 
   /**
    * @brief Get motor amplitude in revolutions based on current compression level
