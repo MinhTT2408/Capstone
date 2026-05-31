@@ -76,6 +76,18 @@ static QueueHandle_t forceLogQueue = nullptr;
 static File forceFile;
 static volatile bool closeForceFileRequested = false;
 
+// Motor validation log — plaintext CSV, persistent file handle per session
+struct MotorLogItem {
+  uint32_t elapsedMs;
+  uint8_t  motorIndex;
+  int16_t  pwmSigned;     // -1023..+1023 (negative = REVERSE)
+  int32_t  encoderCounts;
+  float    targetCounts;
+};
+static QueueHandle_t motorLogQueue = nullptr;
+static File motorLogFile;
+static volatile bool closeMotorFileRequested = false;
+
 // Global stop flag for motor abort
 volatile bool stopMotorRequested = false;
 
@@ -199,6 +211,31 @@ static void sdWriteTask(void *parameter) {
       }
       closeForceFileRequested = false;
     }
+
+    // Drain motor validation queue
+    if (motorLogQueue != nullptr) {
+      MotorLogItem mitem;
+      while (xQueueReceive(motorLogQueue, &mitem, 0) == pdTRUE) {
+        if (motorLogFile) {
+          char row[64];
+          snprintf(row, sizeof(row), "%lu,%d,%d,%ld,%.2f\n",
+                   (unsigned long)mitem.elapsedMs, (int)mitem.motorIndex,
+                   (int)mitem.pwmSigned, (long)mitem.encoderCounts,
+                   mitem.targetCounts);
+          motorLogFile.print(row);
+        }
+      }
+    }
+
+    // Close motor log file once session has ended
+    if (closeMotorFileRequested) {
+      if (motorLogFile) {
+        motorLogFile.flush();
+        motorLogFile.close();
+        Serial.println("[SD] Motor log file closed");
+      }
+      closeMotorFileRequested = false;
+    }
   }
 }
 
@@ -262,6 +299,18 @@ static void startNewSession() {
     } else {
       Serial.println("[SD] Failed to create force log file!");
     }
+
+    // Motor validation log: /motor_log_NNNN.csv
+    char motorLogName[32];
+    snprintf(motorLogName, sizeof(motorLogName), "/motor_log_%s.csv", numStr.c_str());
+    if (SD.exists(motorLogName)) SD.remove(motorLogName);
+    motorLogFile = SD.open(motorLogName, FILE_WRITE);
+    if (motorLogFile) {
+      motorLogFile.println("TimeMs,MotorIdx,PWM_Signed,Encoder_Counts,Target_Counts");
+      Serial.printf("[SD] Motor log file: %s\n", motorLogName);
+    } else {
+      Serial.println("[SD] Failed to create motor log file!");
+    }
   }
   lastSdWriteTime = millis();
 }
@@ -293,8 +342,9 @@ static void doEndSession() {
       Serial.println("[SD] Summary appended to /history.txt");
     }
   }
-  // Signal sdWriteTask to drain the force queue then flush + close the file
+  // Signal sdWriteTask to drain the force queue then flush + close the files
   closeForceFileRequested = true;
+  closeMotorFileRequested = true;
   currentFilename = "";
   compressionLevel = 0;
 }
@@ -336,6 +386,7 @@ void begin() {
   // Initialize SD FreeRTOS Queues and Task
   sdLogQueue    = xQueueCreate(20,  sizeof(LogItem));
   forceLogQueue = xQueueCreate(100, sizeof(ForceLogItem));  // 100 items = ~2s buffer at 50Hz
+  motorLogQueue = xQueueCreate(300, sizeof(MotorLogItem));  // 300 items = ~1s buffer at 100Hz x 3 motors
   if (sdLogQueue != nullptr) {
     xTaskCreatePinnedToCore(
       sdWriteTask,      // Function implementing the task
@@ -516,6 +567,18 @@ void logForceData(uint32_t elapsedMs, float f1, float f2, float f3) {
   item.force[2]  = f3;
   // Non-blocking: drops silently if queue is full (mirrors PPG log behavior)
   xQueueSend(forceLogQueue, &item, 0);
+}
+
+void logMotorData(uint32_t elapsedMs, int motorIndex,
+                  int pwmSigned, long encoderCounts, float targetCounts) {
+  if (!sdAvailable || motorLogQueue == nullptr) return;
+  MotorLogItem item;
+  item.elapsedMs     = elapsedMs;
+  item.motorIndex    = (uint8_t)motorIndex;
+  item.pwmSigned     = (int16_t)pwmSigned;
+  item.encoderCounts = (int32_t)encoderCounts;
+  item.targetCounts  = targetCounts;
+  xQueueSend(motorLogQueue, &item, 0);
 }
 
 unsigned long getSessionStartTime() {

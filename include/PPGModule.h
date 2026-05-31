@@ -95,6 +95,19 @@ namespace PPGModule {
   void logForceData(uint32_t elapsedMs, float f1, float f2, float f3);
 
   /**
+   * @brief Queue one motor-validation row for SD write.
+   * Logs signed PWM command and encoder position for post-session plotting.
+   * Non-blocking — drops silently if queue is full.
+   * @param elapsedMs     Milliseconds since session start
+   * @param motorIndex    Motor index: 0, 1, or 2
+   * @param pwmSigned     LEDC duty cycle -1023..+1023 (negative = REVERSE direction)
+   * @param encoderCounts Raw PCNT + overflow count from EncoderModule::getPosition()
+   * @param targetCounts  Sine-wave setpoint in encoder counts
+   */
+  void logMotorData(uint32_t elapsedMs, int motorIndex,
+                    int pwmSigned, long encoderCounts, float targetCounts);
+
+  /**
    * @brief Return the millis() timestamp when the current session started.
    * Used by forceLogTask in main.cpp to compute elapsed time.
    */

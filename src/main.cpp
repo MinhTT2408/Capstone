@@ -153,9 +153,12 @@ void loop() {
       // Determine per-motor amplitudes via ForceControl
       float amplitudes[3];
       if (sequenceCount == 0) {
-        for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getInitialAmplitude(i);
-        Serial.printf("[BLE Session] First sequence - Initial amplitudes: M1=%.2f M2=%.2f M3=%.2f rev\n",
-                      amplitudes[0], amplitudes[1], amplitudes[2]);
+        // First cycle: run at DEFAULT_AMPLITUDE_REV before force feedback takes over.
+        // Also seed currentAmplitude so computeNextAmplitude() adjusts from the right base.
+        ForceControl::setCurrentAmplitude(DEFAULT_AMPLITUDE_REV);
+        for (int i = 0; i < 3; i++) amplitudes[i] = DEFAULT_AMPLITUDE_REV;
+        Serial.printf("[BLE Session] First cycle — default amplitude: %.2f rev (force feedback starts next cycle)\n",
+                      DEFAULT_AMPLITUDE_REV);
       } else {
         for (int i = 0; i < 3; i++) amplitudes[i] = ForceControl::getDesiredRevolutions(i);
       }

@@ -7,7 +7,7 @@
 // ===================== USER TUNABLE PARAMETERS =====================
 
 // Sine profile timing
-static const uint32_t SINE_DURATION_MS = 5000;   // total time per motor for one sine cycle
+static const uint32_t SINE_DURATION_MS = 2000;   // total time per motor for one sine cycle
 static const uint32_t PAUSE_BETWEEN_MS = 400;    // small pause after each motor finishes
 
 // PWM setup
@@ -111,6 +111,6 @@ static const float LEVEL_FORCE_SETPOINT[] = {0.0f, 8.0f, 13.0f, 18.0f, 25.0f};  
 static const int NUM_LEVELS = 4;
 
 // Default amplitude when no BLE session and force control is disabled
-static const float DEFAULT_AMPLITUDE_REV = 5.0f;
+static const float DEFAULT_AMPLITUDE_REV = 3.0f;
 
 #endif // CONFIG_H

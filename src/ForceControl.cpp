@@ -23,6 +23,11 @@ static float currentAmplitude[3] = {5.0f, 5.0f, 5.0f};  // Initial amplitude per
 static const float ADC_MAX = 4095.0f;  // 12-bit ADC
 static const float ADC_REF_VOLTAGE = 3.3f;
 
+// Low-pass filter state (5 Hz cutoff, first-order IIR)
+// alpha = dt / (dt + 1/(2*pi*fc)) = 0.020 / (0.020 + 0.031831) = 0.3859
+static const float LPF_ALPHA = 0.3859f;
+static float filteredForce[3] = {0.0f, 0.0f, 0.0f};
+
 // ===================== IMPLEMENTATION =====================
 
 void begin() {
@@ -69,8 +74,13 @@ float readForce(int motorIndex) {
   // Convert to voltage
   float voltage = (rawValue / ADC_MAX) * ADC_REF_VOLTAGE;
   
-  // Map voltage to force (linear mapping)
-  float force = voltage * 11.25; 
+  // Map voltage to force (polynomial mapping)
+  float force = voltage * voltage * 3.92f + 9.9323f * voltage + 1.45f;
+
+  // Apply first-order IIR low-pass filter (5 Hz cutoff)
+  filteredForce[motorIndex] = LPF_ALPHA * force + (1.0f - LPF_ALPHA) * filteredForce[motorIndex];
+  force = filteredForce[motorIndex];
+
   // Clamp to valid range
   force = constrain(force, FORCE_MIN, FORCE_MAX);
 
@@ -124,6 +134,7 @@ void reset() {
     forcePID[i].reset();
     desiredRevolutions[i] = 0.0f;
     lastMeasuredForce[i] = 0.0f;
+    filteredForce[i] = 0.0f;
   }
   lastUpdateTime = millis();
   Serial.println("Force control reset (all 3 motors)");
@@ -220,6 +231,12 @@ float computeNextAmplitude(int motorIndex) {
 
 float getInitialAmplitude(int motorIndex) {
   return currentAmplitude[motorIndex];
+}
+
+void setCurrentAmplitude(float amplitude) {
+  for (int i = 0; i < 3; i++) {
+    currentAmplitude[i] = amplitude;
+  }
 }
 
 } // namespace ForceControl

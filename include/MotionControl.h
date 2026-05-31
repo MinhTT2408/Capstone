@@ -29,9 +29,11 @@ namespace MotionControl {
   
   // Helper function: Execute motor control based on current state
   // Returns the target position being commanded
+  // Set doLog=true to queue a motor-validation row to SD (rate-limited externally)
   float updateMotorState(BTS7960& motor, int motorIndex, MotorState state, 
                          unsigned long phaseStartTime, uint32_t halfCycleDuration,
-                         float amplitudeCounts, float holdTarget = 0.0f);
+                         float amplitudeCounts, float holdTarget = 0.0f,
+                         bool doLog = false);
   
   // Run one complete sine cycle with closed-loop position control (single motor)
   void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions = 2.0f);                               

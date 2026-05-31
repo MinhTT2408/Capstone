@@ -12,6 +12,9 @@ namespace MotionControl {
 // PID controllers for each motor
 PIDController pidMotor[NUM_MOTORS];
 
+// Rate-limit timestamp shared across all pattern functions (100 Hz motor log)
+static uint32_t s_lastMotorLogMs = 0;
+
 void begin() {
   // Initialize PID controllers
   for (int i = 0; i < NUM_MOTORS; i++) {
@@ -29,7 +32,7 @@ void begin() {
 
 float updateMotorState(BTS7960& motor, int motorIndex, MotorState state, 
                        unsigned long phaseStartTime, uint32_t halfCycleDuration,
-                       float amplitudeCounts, float holdTarget) {
+                       float amplitudeCounts, float holdTarget, bool doLog) {
   const float pidSampleTimeS = PID_SAMPLE_TIME_MS / 1000.0f;
   long currentPos = EncoderModule::getPosition(motorIndex);
   float targetPos = 0.0f;
@@ -57,6 +60,11 @@ float updateMotorState(BTS7960& motor, int motorIndex, MotorState state,
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motor.set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(millis() - PPGModule::getSessionStartTime(),
+                                  motorIndex, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       }
       break;
       
@@ -78,6 +86,11 @@ float updateMotorState(BTS7960& motor, int motorIndex, MotorState state,
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motor.set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(millis() - PPGModule::getSessionStartTime(),
+                                  motorIndex, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       }
       break;
       
@@ -90,6 +103,11 @@ float updateMotorState(BTS7960& motor, int motorIndex, MotorState state,
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motor.set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(millis() - PPGModule::getSessionStartTime(),
+                                  motorIndex, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       }
       break;
   }
@@ -167,6 +185,14 @@ void runSineCycle(BTS7960& motor, int motorIndex, float amplitudeRevolutions) {
       
       // Send command to motor
       motor.set(duty, direction);
+
+      // Motor validation log at 100 Hz
+      if (PPGModule::isSessionActive() && (now - s_lastMotorLogMs >= 10)) {
+        s_lastMotorLogMs = now;
+        PPGModule::logMotorData(now - PPGModule::getSessionStartTime(),
+                                motorIndex, (direction == FORWARD) ? duty : -duty,
+                                (long)currentPosition, targetPosition);
+      }
 
       // Teleplot output (every loop for real-time plotting)
       // Serial.printf(">M%d_Target:%ld\n", motorIndex + 1, (long)targetPosition);
@@ -283,7 +309,10 @@ void executePattern2(BTS7960 motors[], float amplitudes[]) {
       
       // Update force tracking during motion
       ForceControl::updatePeakTracking();
-      
+
+      bool doLog = PPGModule::isSessionActive() && (now - s_lastMotorLogMs >= 10);
+      if (doLog) s_lastMotorLogMs = now;
+
       float globalElapsed = (now - globalStartTime) / 1000.0f;
       
       // Motor 1: Active from t=0 to SINE_DURATION_MS
@@ -299,6 +328,11 @@ void executePattern2(BTS7960 motors[], float amplitudes[]) {
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motors[0].set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(now - PPGModule::getSessionStartTime(),
+                                  0, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       } else {
         motors[0].coast();
       }
@@ -316,6 +350,11 @@ void executePattern2(BTS7960 motors[], float amplitudes[]) {
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motors[1].set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(now - PPGModule::getSessionStartTime(),
+                                  1, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       } else if (!motor2Started) {
         motors[1].coast();
       }
@@ -333,6 +372,11 @@ void executePattern2(BTS7960 motors[], float amplitudes[]) {
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motors[2].set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(now - PPGModule::getSessionStartTime(),
+                                  2, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       } else {
         motors[2].coast();
       }
@@ -503,10 +547,13 @@ void executePattern3(BTS7960 motors[], float amplitudes[]) {
     if (now - lastPidTime >= PID_SAMPLE_TIME_MS) {
       // Update force tracking during motion
       ForceControl::updatePeakTracking();
-      
+
+      bool doLog = PPGModule::isSessionActive() && (now - s_lastMotorLogMs >= 10);
+      if (doLog) s_lastMotorLogMs = now;
+
       for (int i = 0; i < 3; i++) {
         updateMotorState(motors[i], i, motorStates[i], motorPhaseStartTime[i], 
-                        halfCycleDuration, amplitudeCounts[i], motorTargets[i]);
+                        halfCycleDuration, amplitudeCounts[i], motorTargets[i], doLog);
       }
       
       // Logging
@@ -648,10 +695,13 @@ void executePattern4(BTS7960 motors[], float amplitudes[]) {
     if (now - lastPidTime >= PID_SAMPLE_TIME_MS) {
       // Update force tracking during motion
       ForceControl::updatePeakTracking();
-      
+
+      bool doLog = PPGModule::isSessionActive() && (now - s_lastMotorLogMs >= 10);
+      if (doLog) s_lastMotorLogMs = now;
+
       for (int i = 0; i < 3; i++) {
         updateMotorState(motors[i], i, motorStates[i], motorPhaseStartTime[i], 
-                        halfCycleDuration, amplitudeCounts[i], motorTargets[i]);
+                        halfCycleDuration, amplitudeCounts[i], motorTargets[i], doLog);
       }
       
       // Logging
@@ -744,6 +794,9 @@ void executePattern5(BTS7960 motors[], float amplitudes[]) {
       // Negative for counterclockwise-first (matches other patterns)
       float targetFraction = -sineValue;
 
+      bool doLog = PPGModule::isSessionActive() && (now - s_lastMotorLogMs >= 10);
+      if (doLog) s_lastMotorLogMs = now;
+
       for (int i = 0; i < NUM_MOTORS; i++) {
         float targetPos = targetFraction * amplitudeCounts[i];
         long currentPos = EncoderModule::getPosition(i);
@@ -752,6 +805,11 @@ void executePattern5(BTS7960 motors[], float amplitudes[]) {
         Dir dir = (pidOut >= 0.0f) ? FORWARD : REVERSE;
         int duty = (int)constrain(fabsf(pidOut), 0.0f, (float)PWM_MAX);
         motors[i].set(duty, dir);
+        if (doLog) {
+          PPGModule::logMotorData(now - PPGModule::getSessionStartTime(),
+                                  i, (dir == FORWARD) ? duty : -duty,
+                                  (long)currentPos, targetPos);
+        }
       }
 
       // Logging

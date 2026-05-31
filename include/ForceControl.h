@@ -17,7 +17,7 @@ static const float FORCE_MIN = 0.0f;           // Minimum force in Newtons (at m
 static const float FORCE_MAX = 100.0f;         // Maximum force in Newtons (at max voltage)
 
 // Force PID parameters (outer loop - typically slower than inner loop)
-static const float FORCE_PID_KP = 0.7f;        // Proportional gain
+static const float FORCE_PID_KP = 0.15f;        // Proportional gain
 static const float FORCE_PID_KI = 0.1f;        // Integral gain
 static const float FORCE_PID_KD = 0.01f;       // Derivative gain
 static const float FORCE_PID_SAMPLE_TIME_MS = 20.0f;  // 20ms = 50Hz (slower than position loop)
@@ -155,6 +155,14 @@ float computeNextAmplitude(int motorIndex);
  * @return Initial amplitude in revolutions
  */
 float getInitialAmplitude(int motorIndex);
+
+/**
+ * @brief Seed currentAmplitude for all motors to a fixed value.
+ * Call this before the first BLE session cycle so that computeNextAmplitude()
+ * adjusts relative to the correct starting point.
+ * @param amplitude Starting amplitude in revolutions
+ */
+void setCurrentAmplitude(float amplitude);
 
 } // namespace ForceControl
 
