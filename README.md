@@ -10,6 +10,28 @@ The system supports two operating modes:
 
 ---
 
+## System Overview
+
+### Concept
+
+![System concept diagram](figure/system_graph.png)
+
+The system applies **gradient pressure compression** to the lower leg to help treat thrombosis conditions and restore healthy venous flow. Three linear sliders, each driven by a DC motor, displace fluid volume to inflate three leg braces. The ESP32 control board drives the sliders and reads feedback from the sensors (PPG blood monitoring sensor, piezoelectric force sensor, fluid pressure sensor). A mobile app connects over Bluetooth to track blood flow and force, and to choose the compression sequence and level.
+
+### Hardware Integration
+
+![Integrated system test bench](figure/system_integration.png)
+
+The test bench consists of:
+- **3 linear sliders** with DC motors, each pushing syringes to actuate one brace.
+- **3 different braces** mounted on artificial silicone cuts that mimic the human leg, with **dual actuators** creating the compression force.
+- **Embedded force-resistive sensors** inside the braces and an inline **pressure sensor** on the fluid line.
+- A **PPG sensor** for blood-flow monitoring.
+- A custom **PCB control board** carrying the ESP32-S3.
+- A **real-time Force/PPG tracking app** on the phone.
+
+---
+
 ## System Architecture
 
 ### Control Loop (Cascaded PID)
